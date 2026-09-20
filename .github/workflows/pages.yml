@@ -1,0 +1,55 @@
+# Publishes the playable jar to GitHub Pages on every push to main.
+#
+# Deploys the ORDINARY build, not the single-file one. Over a network, separate files are strictly
+# better: the page itself is ~140 kB and each music track is fetched only when the jar first calls for
+# it, where `terrapixel.html` would make every visitor download ~22 MB of embedded audio before the
+# first frame. The single file stays what it is for — playing with no server and no network at all.
+name: Deploy to Pages
+
+on:
+  push:
+    branches: [main]
+  # So a deploy can be re-run from the Actions tab without pushing anything.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; a newer push supersedes a queued one rather than racing it.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Type checking only, deliberately: it catches anything that would publish a broken page, in
+      # seconds. The full suite is minutes — many of its tests grow a jar for forty sim-days — so it
+      # stays a local `npm test` rather than something every deploy waits on.
+      - run: npx tsc --noEmit
+      - run: npx vite build
+        env:
+          # A project site lives at /<repo>/, so the asset URLs have to carry that prefix.
+          PAGES_BASE: /TerraPixel/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

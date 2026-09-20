@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TerraPixel</title>
+    <link rel="stylesheet" href="/src/ui/style.css" />
+  </head>
+  <body>
+    <!--
+      The notebook spread. The canvas lives here in the markup, not inside a Panel template: main.ts
+      and the Renderer take hold of #stage before Panel is built, so a Panel that set innerHTML on any
+      ancestor of the canvas would silently destroy the element they are drawing into.
+    -->
+    <div id="app">
+      <header id="topbar"></header>
+      <main id="jar"><canvas id="stage" width="792" height="408"></canvas></main>
+      <section id="tray" aria-label="Tools"></section>
+      <aside id="notes" aria-label="Field notes"></aside>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

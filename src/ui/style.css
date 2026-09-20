@@ -1,0 +1,454 @@
+/*
+ * A naturalist's field notebook. Every hue comes from the subject rather than a generic warm
+ * palette: aged paper and pencil, fountain-pen ink, a faded red correction pen, and the jar's own
+ * substrate and leaf tones. The page is yellowed, never white, and the "black" is a warm near-black
+ * because pencil never is.
+ */
+:root {
+  color-scheme: light;
+  --bg: #efe7d8;
+  --panel: #f6f1e6;
+  --line: #d8cdb8;
+  --text: #2c2a26;
+  --dim: #7a7265;
+  --good: #5f7f4a;
+  --warn: #b8892c;
+  --bad: #a9462f;
+  --accent: #3f6b8a;
+  /* The red pen down the margin. */
+  --margin: #bf6a58;
+  --serif: ui-serif, Georgia, 'Iowan Old Style', 'Palatino Linotype', serif;
+  --line-h: 22px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  color: var(--text);
+  font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  /*
+   * Ruled paper, drawn with a gradient rather than an image. The pitch matches --line-h so the
+   * panel's text sits ON the lines instead of drifting across them.
+   */
+  background:
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent calc(var(--line-h) - 1px),
+      rgba(120, 140, 170, 0.13) calc(var(--line-h) - 1px),
+      rgba(120, 140, 170, 0.13) var(--line-h)
+    ),
+    var(--bg);
+}
+
+/*
+ * The notebook spread: global controls across the top, the jar with its tools directly beneath it,
+ * and field notes down the right ordered by urgency. Built so that nothing you touch while playing
+ * sits below the fold at a common laptop size.
+ */
+#app {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  grid-template-areas:
+    'top  top'
+    'jar  notes'
+    'tray notes';
+  grid-template-rows: auto auto 1fr;
+  gap: 12px 18px;
+  padding: 12px 18px;
+  max-width: 1500px;
+  margin: 0 auto;
+  align-items: start;
+}
+
+#topbar {
+  grid-area: top;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 20px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  box-shadow: 0 1px 0 rgba(44, 42, 38, 0.06);
+}
+
+.topbar-title {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-family: var(--serif);
+}
+
+.topbar-title strong { font-size: 18px; font-weight: 600; }
+.topbar-title .clock { font-size: 14px; color: var(--text); }
+.topbar-title .mood { font-style: italic; color: var(--dim); }
+.census { font-size: 12px; color: var(--dim); }
+
+.topbar-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.speed { display: flex; gap: 4px; }
+.speed button { padding: 5px 9px; }
+
+.lamp { display: flex; align-items: center; gap: 7px; color: var(--dim); }
+
+.quiet-btn { color: var(--dim); font-size: 12px; padding: 5px 8px; }
+
+#jar { grid-area: jar; min-width: 0; }
+
+#stage {
+  display: block;
+  /* No box: the jar is drawn as a vessel sitting directly on the ruled page. And no pixelated
+     scaling - the renderer draws at the real on-screen pixel size, so there is nothing to stretch. */
+  cursor: crosshair;
+  /*
+   * Fill the column, but never so tall that the tray is pushed below the fold: the width is capped by
+   * the height that is actually available, times the jar's 792:408 aspect. `height: auto` keeps the
+   * shape, and Renderer.toGrid already maps clicks through the on-screen size, so aiming is unaffected.
+   */
+  width: min(100%, calc((100vh - 250px) * 1.941));
+  height: auto;
+}
+
+#tray {
+  grid-area: tray;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  box-shadow: 0 1px 0 rgba(44, 42, 38, 0.06);
+}
+
+.tray-row {
+  display: grid;
+  grid-template-columns: 50px minmax(0, 1fr);
+  align-items: start;
+  gap: 4px 10px;
+  transition: opacity 160ms;
+}
+
+/* The row for the phase you are NOT in is dimmed, never hidden: painting still works after sealing. */
+.tray-row.inactive { opacity: 0.5; }
+.tray-row.inactive:hover { opacity: 0.85; }
+.tray-row .hint { grid-column: 2; }
+
+.tray-label {
+  padding-top: 6px;
+  font-family: var(--serif);
+  font-variant: small-caps;
+  text-transform: lowercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+
+.tools .sep { width: 1px; align-self: stretch; margin: 0 4px; background: var(--line); }
+
+/* The field notes, behind the red margin rule. Scrolls on its own so the jar never scrolls away. */
+#notes {
+  grid-area: notes;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-left: 14px;
+  border-left: 1px solid var(--margin);
+  /* Viewport minus the topbar row, grid gaps and page padding. At 96px the page overflowed by 3px
+     at 1366x768 - measured, not guessed. */
+  max-height: calc(100vh - 104px);
+  overflow-y: auto;
+}
+
+/* Nothing wrong: the diagnosis shrinks to one line so Selected plant sits at the top. */
+.alerts-card.quiet { padding: 7px 12px; }
+.alerts-card.quiet h2 { display: none; }
+
+@media (max-width: 960px) {
+  #app {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: 'top' 'jar' 'tray' 'notes';
+    grid-template-rows: auto;
+  }
+  #stage { width: 100%; }
+  #notes {
+    max-height: none;
+    overflow: visible;
+    padding-left: 0;
+    border-left: none;
+    padding-top: 12px;
+    border-top: 1px solid var(--margin);
+  }
+}
+
+.card {
+  /* A fresher sheet laid on the ruled page: opaque, so the ruling never fights the readouts. */
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  padding: 12px 12px 10px;
+  box-shadow: 0 1px 0 rgba(44, 42, 38, 0.06);
+}
+
+/* A section heading in a lab notebook: small caps, underscored with a hairline. */
+.card h2 {
+  margin: 0 0 10px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--line);
+  font-family: var(--serif);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  font-variant: small-caps;
+  text-transform: lowercase;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.row:last-child { margin-bottom: 0; }
+
+.row label { color: var(--dim); }
+
+.readout {
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, monospace;
+}
+
+.tools { display: flex; flex-wrap: wrap; gap: 6px; }
+
+button {
+  background: #fbf7ee;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 6px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:hover { border-color: var(--accent); }
+
+/* Selected reads like something ringed in pen, not a filled UI chip. */
+button[aria-pressed='true'] {
+  background: #e7eef3;
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  color: #1f3b4d;
+}
+
+button.primary { background: #e9f0e3; border-color: var(--good); }
+
+button:disabled { opacity: 0.4; cursor: default; }
+
+input[type='range'] { width: 130px; accent-color: var(--accent); }
+
+.bar {
+  position: relative;
+  height: 7px;
+  border-radius: 4px;
+  background: rgba(44, 42, 38, 0.10);
+  overflow: hidden;
+  flex: 1;
+}
+
+.bar > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 4px;
+  transition: width 120ms linear;
+}
+
+.gauge {
+  display: grid;
+  grid-template-columns: 68px 1fr 62px;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.gauge > span:first-child { color: var(--dim); }
+.gauge > .readout { text-align: right; font-size: 12px; }
+
+#alerts { display: flex; flex-direction: column; gap: 6px; }
+
+.alert {
+  border-left: 3px solid var(--warn);
+  padding: 6px 9px;
+  background: rgba(184, 137, 44, 0.10);
+  border-radius: 0 3px 3px 0;
+}
+
+.alert.fail { border-left-color: var(--bad); background: rgba(169, 70, 47, 0.10); }
+.alert strong { display: block; color: var(--text); font-family: var(--serif); }
+.alert em { color: var(--dim); font-style: normal; }
+
+.hint { color: var(--dim); font-size: 12px; margin: 0; }
+
+/* Alerts stacked inline inside a card (the diagnosis), rather than in the #alerts list. */
+.advice { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+
+/* --- Onboarding: intro modal + getting-started checklist --- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  /* An ink wash over the page: dark enough to set the card apart from the ruled paper behind it. */
+  background: rgba(44, 42, 38, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 16px;
+}
+
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 22px 24px;
+  max-width: 430px;
+  box-shadow: 0 16px 48px rgba(44, 42, 38, 0.28);
+}
+
+.modal h2 {
+  margin: 0 0 10px;
+  font-family: var(--serif);
+  font-size: 19px;
+  color: var(--text);
+}
+
+.modal p {
+  margin: 0 0 12px;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.modal p:last-of-type { margin-bottom: 0; }
+
+.modal .layer-order {
+  background: rgba(63, 107, 138, 0.07);
+  border: 1px solid rgba(63, 107, 138, 0.25);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.modal .layer-order strong {
+  display: block;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 7px;
+}
+
+.layer-chain {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.layer-chain .chip {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 3px;
+  color: var(--text);
+}
+
+/* The same substrate tones the jar is drawn in, so the chips read as swatches of the real layers. */
+.layer-chain .chip.gravel { background: #b9b2a4; }
+.layer-chain .chip.charcoal { background: #6d665c; color: var(--panel); }
+.layer-chain .chip.soil { background: #b08a5e; }
+
+.layer-chain .arrow { color: var(--dim); font-size: 12px; }
+
+.modal .skip-intro {
+  background: none;
+  border: none;
+  color: var(--dim);
+  font-size: 12px;
+  padding: 6px 2px;
+}
+
+.modal .skip-intro:hover { color: var(--text); border-color: transparent; }
+
+.onboarding-checklist.hidden { display: none; }
+
+/* A lesson reads as a note that just arrived, so it is tinted rather than silent like the data cards. */
+.lesson-card.hidden { display: none; }
+.lesson-card { border-left: 3px solid var(--accent, #6d8a5a); }
+.lesson-body { margin: 6px 0 10px; }
+
+/* The credit closes the notes column: legible if looked for, invisible if not. */
+.credit {
+  margin: 14px 2px 4px;
+  font-size: 11px;
+  color: var(--dim);
+  letter-spacing: 0.02em;
+}
+
+.checklist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.checklist li {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dim);
+  transition: opacity 200ms, color 200ms;
+}
+
+.checklist li .mark {
+  flex: 0 0 auto;
+  width: 14px;
+  text-align: center;
+  font-family: ui-monospace, monospace;
+}
+
+.checklist li b { color: var(--dim); font-weight: 600; }
+.checklist li small { color: var(--dim); }
+
+.checklist li[data-state='current'] { color: var(--text); }
+.checklist li[data-state='current'] .mark { color: var(--accent); }
+.checklist li[data-state='current'] b { color: var(--text); }
+
+.checklist li[data-state='done'] { opacity: 0.55; }
+.checklist li[data-state='done'] .mark { color: var(--good); }
+
+.checklist li[data-state='pending'] { opacity: 0.45; }
+
+.checklist li.dismiss-row {
+  justify-content: flex-end;
+  margin-top: 2px;
+}
+
+.checklist .dismiss-checklist {
+  padding: 4px 12px;
+  font-size: 12px;
+}

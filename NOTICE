@@ -1,0 +1,23 @@
+TerraPixel
+Copyright (c) 2026 Robert Audley
+
+The SOURCE CODE of this project is licensed under the PolyForm Noncommercial
+License 1.0.0; see LICENSE. That covers everything under src/, tools/ and
+tests/. You may read it, run it, modify it and share it for any noncommercial
+purpose. You may not sell it, or use it commercially, without permission.
+
+The following are NOT covered by that licence and are reserved:
+
+  * The music in Sound-Effects/ (Alert-, Climax-, Main- and Title-Ambience.mp3).
+  * The visual design of the jar: its palette, layout and illustrated style.
+
+These are included so the game runs and may be redistributed as part of it
+unmodified. They may not be extracted and reused on their own.
+
+A note on the music, stated plainly rather than overclaimed: the four tracks were
+generated with an AI music tool. In some jurisdictions, including the United
+States, purely AI-generated output may not attract copyright protection at all.
+No claim of authorship over the generated audio itself is made here beyond its
+selection, arrangement and use within this game.
+
+For commercial use of any part of this project, ask.
