@@ -51,12 +51,6 @@ const STEPS: Step[] = [
     done: (w) => w.grid.activeCells.length > 0,
   },
   {
-    id: 'seal',
-    label: 'Seal the jar',
-    sub: 'Locks in your layout and starts the clock — nothing more gets added after this.',
-    done: (w) => w.phase !== 'build',
-  },
-  {
     id: 'water',
     label: 'Water the soil',
     sub: 'Click, or click and hold, with the Water tool to soak it.',
@@ -78,7 +72,7 @@ const STEPS: Step[] = [
 const CLOSING_DISPLAY_MS = 12000;
 
 export class Onboarding {
-  private readonly modal: HTMLElement | null;
+  private modal: HTMLElement | null;
   private readonly checklistCard: HTMLElement;
   private readonly listEl: HTMLElement;
 
@@ -87,8 +81,16 @@ export class Onboarding {
   private completed = hasSeenOnboarding();
   private closingSince = -1;
 
-  constructor(panelHost: HTMLElement) {
+  /**
+   * @param onStart Starts the jar's clock. Called when the intro is dismissed, so no time passes while a
+   *                first-time player is reading it, or straight away for anyone who has seen it before.
+   */
+  constructor(
+    private readonly panelHost: HTMLElement,
+    private readonly onStart: () => void,
+  ) {
     this.modal = hasSeenOnboarding() ? null : buildModal(() => this.dismissIntro());
+    if (!this.modal) onStart();
 
     this.checklistCard = document.createElement('div');
     this.checklistCard.className = 'card onboarding-checklist';
@@ -108,8 +110,31 @@ export class Onboarding {
 
   private dismissIntro(): void {
     this.modal?.remove();
+    this.modal = null;
+    this.onStart();
     markOnboarded();
     this.checklistCard.classList.remove('hidden');
+  }
+
+  /**
+   * Show the intro and the getting-started checklist again, from the settings menu. The jar carries on
+   * as it is: steps already done show as done, and the closing tips come round once more.
+   */
+  replay(): void {
+    this.modal?.remove();
+    this.completed = false;
+    this.closingSince = -1;
+    delete this.listEl.dataset.closing;
+    if (!this.checklistCard.isConnected) this.panelHost.prepend(this.checklistCard);
+    this.checklistCard.classList.add('hidden');
+    this.modal = buildModal(() => this.dismissIntro());
+    document.body.appendChild(this.modal);
+    this.modal.querySelector<HTMLButtonElement>('.start')?.focus();
+  }
+
+  /** Whether the intro card is up, so the game can hold keyboard shortcuts while it is. */
+  get introOpen(): boolean {
+    return this.modal !== null;
   }
 
   /** Called once per animation frame, same cadence as Panel.update(). */
@@ -190,8 +215,8 @@ function buildModal(onDismiss: () => void): HTMLElement {
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="intro-title">
       <h2 id="intro-title">A Sealed Terrarium</h2>
       <p>
-        This jar is a closed loop. Once you seal it, nothing new comes in — water, air, and
-        nutrients all have to keep recycling on their own, and how you layer it beforehand decides
+        This jar is a closed loop, and its clock is already running. Nothing new comes in — water,
+        air, and nutrients all have to keep recycling on their own, and how you layer it decides
         whether that loop can hold.
       </p>
       <p>
@@ -211,13 +236,13 @@ function buildModal(onDismiss: () => void): HTMLElement {
         it done for you.
       </p>
       <p>
-        Seal the jar, water the soil, and plant a seed. Once it's growing, add springtails when
+        Lay out the layers, water the soil, and plant a seed. Once it's growing, add springtails when
         leaves start dropping to keep nutrients cycling — a plant that's thriving will eventually
         flower, and that's how you'll know you got it right.
       </p>
       <div class="row" style="justify-content: space-between; margin-top: 14px">
         <button class="skip-intro" type="button">skip intro</button>
-        <button class="primary start" type="button">Start building</button>
+        <button class="primary start" type="button">Start</button>
       </div>
     </div>
   `;

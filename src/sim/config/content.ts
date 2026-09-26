@@ -13,6 +13,8 @@ export const Substrate = {
   Charcoal: 2,
   Soil: 3,
   Glass: 4,
+  /** The pond liner: packed wet clay that holds water instead of letting it through. */
+  Mud: 5,
 } as const;
 
 export type SubstrateId = (typeof Substrate)[keyof typeof Substrate];
@@ -123,6 +125,30 @@ export const SUBSTRATES: Readonly<Record<SubstrateId, SubstrateProps>> = {
     slide: 0.4,
     cohesion: 0.9,
   },
+  [Substrate.Mud]: {
+    name: 'mud',
+    /*
+     * Holds NO water in its pores, which is the whole point of a liner: water cannot get into it, so
+     * it cannot get through it. Anything poured onto mud stays on top as free water.
+     *
+     * Not rootable either. A plant cannot anchor in a pond floor — that is what stage 5's water
+     * plants are for, and they will want their own rules rather than borrowing soil's.
+     */
+    maxMl: 0,
+    fieldCapacityMl: 0,
+    permeability: 0,
+    lateral: 0,
+    rootable: false,
+    filters: 0,
+    solid: true,
+    /*
+     * Barely slides and almost perfectly cohesive: mud stays where it is put, including as the
+     * vertical wall of a basin. Gravel would run into the hole you just dug; mud holds the shape.
+     */
+    granular: true,
+    slide: 0.12,
+    cohesion: 0.95,
+  },
   [Substrate.Glass]: {
     name: 'glass',
     // An impermeable sentinel. The padded border and jar silhouette are made of this, which is
@@ -142,4 +168,9 @@ export const SUBSTRATES: Readonly<Record<SubstrateId, SubstrateProps>> = {
 };
 
 /** Materials the player may place. Glass and Air are structural, not tools. */
-export const PAINTABLE: readonly SubstrateId[] = [Substrate.Gravel, Substrate.Charcoal, Substrate.Soil];
+export const PAINTABLE: readonly SubstrateId[] = [
+  Substrate.Gravel,
+  Substrate.Charcoal,
+  Substrate.Soil,
+  Substrate.Mud,
+];

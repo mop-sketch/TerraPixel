@@ -47,6 +47,21 @@ export class SubstrateGrid {
    */
   readonly charcoalLoad: Float32Array;
   readonly mold: Float32Array;
+  /**
+   * 1 where the player dug solid ground out into open space, and so where a Mud click may line a pond.
+   *
+   * Travels with the open space when material slumps into it, as everything else in a cell does. The
+   * liner used to tell a dug hollow from the jar's own rounded bowl by width alone, capped at 24
+   * columns, and that cap made every pond wider than it impossible to line at all.
+   */
+  readonly dug: Uint8Array;
+  /**
+   * Free water standing in a cell, in millilitres — a puddle, a flooded drainage layer, a pond.
+   *
+   * Only ever non-zero in Air cells. Material holds its water in `moisture`, inside its pores; this
+   * is water with no material to be inside of, which is why it can have a surface and a level.
+   */
+  readonly standing: Float64Array;
   /** Incrementally maintained reverse index of anchored roots. Never rebuilt per tick. */
   readonly rootCount: Uint8Array;
 
@@ -95,6 +110,8 @@ export class SubstrateGrid {
     this.toxin = new Float32Array(this.size);
     this.charcoalLoad = new Float32Array(this.size);
     this.mold = new Float32Array(this.size);
+    this.dug = new Uint8Array(this.size);
+    this.standing = new Float64Array(this.size);
     this.rootCount = new Uint8Array(this.size);
     this.moistureNext = new Float64Array(this.size);
     this.surfaceOfColumn = new Int32Array(this.w).fill(-1);
@@ -181,15 +198,116 @@ export class SubstrateGrid {
       for (let x = 1; x <= this.w - 2; x++) {
         const i = this.idx(x, y);
         const props = this.props(i);
-        if (props.maxMl > 0) {
-          this.activeBuf[n++] = i;
-          if (this.surfaceOfColumn[x] < 0) this.surfaceOfColumn[x] = i;
-        }
+        if (props.maxMl > 0) this.activeBuf[n++] = i;
+        /*
+         * The surface is the topmost SOLID cell, not the topmost water-holding one.
+         *
+         * Those were the same thing until mud existed. Mud is ground that holds no water at all, so
+         * under the old test a lined basin had no surface: the index pointed at the soil *beneath*
+         * the liner, and everything that lands on a surface — poured water, fallen litter — went
+         * straight through the floor of the pond.
+         */
+        if (props.solid && this.surfaceOfColumn[x] < 0) this.surfaceOfColumn[x] = i;
         if (props.filters > 0) this.filterBuf[f++] = i;
       }
     }
     this.activeCells = this.activeBuf.subarray(0, n);
     this.filterCells = this.filterBuf.subarray(0, f);
+  }
+
+  /**
+   * The cells a brush of `radius` centred on (x, y) would change to `material`.
+   *
+   * A round footprint (radius 0 is the single cell), keeping only cells a paint would actually alter:
+   * inside the jar, not glass, and not already that material (spent charcoal excepted, since repainting
+   * it is how a player renews a layer; see `World.paint`). A PURE QUERY, called every frame by the
+   * brush preview as well as once by the brush itself, so the two can never disagree.
+   */
+  brushCells(x: number, y: number, radius: number, material: SubstrateId): number[] {
+    const out: number[] = [];
+    const r2 = radius * radius + radius;
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        if (dx * dx + dy * dy > r2) continue;
+        const cx = x + dx;
+        const cy = y + dy;
+        if (!this.isInterior(cx, cy)) continue;
+        const i = this.idx(cx, cy);
+        const here = this.substrate[i];
+        if (here === Substrate.Glass) continue;
+        if (here === material && !(material === Substrate.Charcoal && this.charcoalLoad[i] > 0)) continue;
+        out.push(i);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Everything a mud liner dropped at (x, y) would do, if that spot is inside a hollow at all.
+   *
+   * A PURE QUERY: reads the grid, changes nothing, and is safe to call every frame from a hover
+   * preview as well as once from the tool that actually paints. That sharing is the whole reason this
+   * lives here rather than beside `paint` — the preview and the real thing must never be able to
+   * disagree about what a click would do.
+   *
+   * The rule is the one the water itself obeys: every cell the pond would touch from below or the
+   * side has to be something it cannot get into. The clicked row is the level being asked for —
+   * walking out to the first column whose ground already stands at or above it finds the rim, so a
+   * shallow click lines a shallow pond and a deep one lines to the depth it was clicked at.
+   *
+   * `liner` is every cell that will turn to mud. `area` is every open cell inside the span at or
+   * below the clicked row — roughly where the pond will end up sitting once it is filled — kept
+   * separate because a preview draws the two very differently and neither the paint nor the sim has
+   * any use for `area` at all.
+   *
+   * Returns null when there is nothing to line: not open air, open at one end (not a basin at all —
+   * lining it would paint a shoreline across open ground and still hold nothing), not DUG (the open air
+   * above an undug floor sits between the jar's own rounded corners, which are real walls, and read as
+   * one enormous basin), or already lined.
+   */
+  basinLiner(x: number, y: number): { liner: number[]; area: number[] } | null {
+    if (!this.isInterior(x, y) || this.substrate[this.idx(x, y)] !== Substrate.Air) return null;
+    /*
+     * The click has to be INSIDE a hollow the player dug. Checking only that the span held some dug
+     * cell let a click in the air over flat ground on the far side of the jar walk across an existing
+     * pond, find ITS dug cells, and line the whole jar between its rounded corners.
+     */
+    if (this.dug[this.idx(x, y)] !== 1) return null;
+
+    const groundY = (col: number): number => {
+      const s = this.surfaceOfColumn[col];
+      return s < 0 ? this.h - 1 : this.yOf(s);
+    };
+
+    let left = x;
+    while (left - 1 >= 1 && groundY(left - 1) > y) left--;
+    let right = x;
+    while (right + 1 <= this.w - 2 && groundY(right + 1) > y) right++;
+    if (left - 1 < 1 || right + 1 > this.w - 2) return null;
+
+    const seen = new Set<number>();
+    const liner: number[] = [];
+    const area: number[] = [];
+    for (let col = left; col <= right; col++) {
+      const floorY = groundY(col);
+      for (let row = y; row < floorY; row++) {
+        const cell = this.idx(col, row);
+        // A shelf or an overhang inside the span holds no water, so nothing behind it needs lining.
+        if (this.substrate[cell] !== Substrate.Air) continue;
+        area.push(cell);
+        for (const n of [cell + this.w, cell - 1, cell + 1]) {
+          if (n < 0 || n >= this.size) continue;
+          const p = this.props(n);
+          // Only ground that water could soak INTO needs replacing; glass and mud already hold it,
+          // and air is simply more of the pond.
+          if (!p.solid || p.maxMl <= 0) continue;
+          if (seen.has(n)) continue;
+          seen.add(n);
+          liner.push(n);
+        }
+      }
+    }
+    return liner.length > 0 ? { liner, area } : null;
   }
 
   /**
@@ -257,6 +375,217 @@ export class SubstrateGrid {
     return sum;
   }
 
+  /**
+   * Free water across the jar. Kept OUT of `totalWaterMl`, which means "water held in the substrate"
+   * and is read as such by the soil readout and the balance harness; the conservation audit adds the
+   * two together itself.
+   */
+  standingMl(): number {
+    let sum = 0;
+    for (let i = 0; i < this.size; i++) sum += this.standing[i];
+    return sum;
+  }
+
+  /** Can free water sit here? Air only — material holds its water in its pores instead. */
+  private holdsWater(i: number): boolean {
+    return this.substrate[i] === Substrate.Air;
+  }
+
+  /**
+   * Free water: settles to the bottom of the space it is in, soaks into what it lands on, and levels.
+   *
+   * ALL OF IT IS INSTANT, and that is a statement about the clock rather than a shortcut. One tick is
+   * a sim-MINUTE; water crosses a jar in about a second and a pond is flat long before a minute is up.
+   *
+   * Levelling used to trade half the difference between neighbouring cells, a few passes a tick. That
+   * spreads one cell per pass, so a steady pour (24 mL a tick landing in one spot) outran it: the
+   * surface heaped into a hill over the pour point, stepped down toward the banks, and shifted every
+   * tick, and a brimming pond stood piled ABOVE its rim instead of spilling. Now each row is levelled
+   * whole, in one step, so a body of water is flat at the end of every tick however fast it is fed.
+   */
+  flowStanding(cfg: CompiledConfig): void {
+    const c = cfg.raw.standing;
+    const soak = c.soakMlPerMin * cfg.dt;
+
+    /*
+     * Most jars never hold a drop, and this runs up to 128 times per frame at the fastest speed. One
+     * read-only sweep finds the rows that actually have water; a jar with no pond leaves immediately.
+     */
+    let loY = this.topStandingRow();
+    if (loY < 0) return;
+
+    this.settleStanding(c.cellMl, soak);
+    /*
+     * Levelling can hand water to a cell the settle has not seen yet (a drop beside a ledge, spilled
+     * into) so the two alternate. A few rounds resolve anything one tick's pour can create; what little
+     * is left resolves next tick, a tenth of a second later on screen.
+     */
+    for (let round = 0; round < c.levelPasses; round++) {
+      // A spill can lift water a row higher than it started, so the band is re-found each round.
+      loY = this.topStandingRow();
+      if (loY < 0) return;
+      for (let y = this.h - 2; y >= loY; y--) this.levelRow(y, c.cellMl, loY);
+      this.settleStanding(c.cellMl, 0);
+    }
+  }
+
+  /** The highest row holding any free water, or -1 when the jar has none. Stops at the first hit. */
+  private topStandingRow(): number {
+    for (let y = 1; y <= this.h - 2; y++) {
+      const row = y * this.w;
+      for (let x = 1; x <= this.w - 2; x++) if (this.standing[row + x] > 0) return y;
+    }
+    return -1;
+  }
+
+  /**
+   * Settle and soak, one column at a time.
+   *
+   * A column is cut into CHAMBERS (runs of open cells with something solid between them) and each
+   * chamber settles on its own. That is what stops water in a basin from draining through the shelf
+   * it is sitting on: a chamber's floor is whatever is under its lowest cell, and water pools on it
+   * rather than continuing past.
+   */
+  private settleStanding(cap: number, soak: number): void {
+    for (let x = 1; x <= this.w - 2; x++) {
+      let y = this.h - 2;
+      while (y >= 1) {
+        if (!this.holdsWater(this.idx(x, y))) {
+          y--;
+          continue;
+        }
+        let top = y;
+        while (top - 1 >= 1 && this.holdsWater(this.idx(x, top - 1))) top--;
+
+        // Lift the whole chamber's water out, then put it back from the floor up.
+        let total = 0;
+        for (let k = top; k <= y; k++) {
+          const i = this.idx(x, k);
+          total += this.standing[i];
+          this.standing[i] = 0;
+        }
+
+        if (total > 0) {
+          // Resting on material: it sinks in at that material's own pace, and stops when the pores
+          // are full, which is when a puddle starts to stand rather than soak.
+          const below = this.idx(x, y) + this.w;
+          if (soak > 0 && below < this.size && !this.holdsWater(below)) {
+            const taken = Math.min(total, soak);
+            total -= taken - this.add(below, taken);
+          }
+
+          let k = y;
+          while (total > 0 && k >= top) {
+            const put = Math.min(total, cap);
+            this.standing[this.idx(x, k)] = put;
+            total -= put;
+            k--;
+          }
+          // A chamber handed more than it can hold keeps the surplus rather than losing it; levelling
+          // carries it sideways. Conservation is not negotiable even when the arithmetic upstream was.
+          if (total > 0) this.standing[this.idx(x, top)] += total;
+        }
+        y = top - 1;
+      }
+    }
+  }
+
+  /**
+   * Level one row of free water in a single step.
+   *
+   * A row is cut into runs of open cells between solid ones, and each run into SUPPORTED stretches:
+   * cells resting on something, either ground or a cell of water that is already full. A supported
+   * stretch is one body of water at this height.
+   *
+   * The stretch takes in everything stacked ABOVE it too, not just what is in the row, and refills from
+   * the bottom: this row across the whole stretch first, the rest spread over the row above. Without
+   * that, a pond's top row sat a hair short of full after levelling, so the row above never counted as
+   * supported; the water a pour stacked over its own columns could only trickle down a sliver per
+   * round, and a brimming pond heaped up over the pour point instead of spilling. Refilled this way,
+   * the row above is exactly full or not reached at all, and when it is reached its stretch runs on
+   * over the rim, which is the spill.
+   *
+   * An unsupported cell beside a stretch is a drop: open space with nothing under it, like the lip of a
+   * deeper hole. Water at the edge of a drop pours over it before it levels, so the stretch empties into
+   * it and the next settle carries it down. That is what makes water on a shelf run into the deep part.
+   */
+  private levelRow(y: number, cap: number, topY: number): void {
+    const full = cap - 1e-9;
+    const row = y * this.w;
+    const supported = (x: number): boolean => {
+      const below = row + this.w + x;
+      return !this.holdsWater(below) || this.standing[below] >= full;
+    };
+
+    let x = 1;
+    while (x <= this.w - 2) {
+      if (!this.holdsWater(row + x)) {
+        x++;
+        continue;
+      }
+      const a = x;
+      while (x <= this.w - 2 && this.holdsWater(row + x)) x++;
+      const b = x - 1;
+
+      let k = a;
+      while (k <= b) {
+        if (!supported(k)) {
+          k++;
+          continue;
+        }
+        const s = k;
+        while (k <= b && supported(k)) k++;
+        const e = k - 1;
+
+        // Everything in this stretch and stacked over it, in the same open air.
+        let sum = 0;
+        for (let i = s; i <= e; i++) {
+          // Nothing stands above `topY`, so the gather stops there instead of climbing the whole jar.
+          for (let cell = row + i; cell >= topY * this.w && this.holdsWater(cell); cell -= this.w) {
+            sum += this.standing[cell];
+            this.standing[cell] = 0;
+          }
+        }
+        if (sum <= 0) continue;
+
+        // Over the edge first, split between the drops on either side.
+        let drops = 0;
+        if (s - 1 >= a) drops++;
+        if (e + 1 <= b) drops++;
+        for (const d of [s - 1, e + 1]) {
+          if (d < a || d > b || drops === 0) continue;
+          const share = sum / drops--;
+          const moved = Math.min(share, Math.max(0, cap - this.standing[row + d]));
+          this.standing[row + d] += moved;
+          sum -= moved;
+        }
+
+        // Refill from this row up, one row at a time, over the columns still open at each height.
+        const len = e - s + 1;
+        const level = Math.min(cap, sum / len);
+        for (let i = s; i <= e; i++) this.standing[row + i] = level;
+        sum -= level * len;
+        for (let r = y - 1; r >= 1 && sum > 1e-12; r--) {
+          const up = r * this.w;
+          let open = 0;
+          for (let i = s; i <= e; i++) if (this.openTo(up + i, row + i)) open++;
+          if (open === 0) break;
+          const per = Math.min(cap, sum / open);
+          for (let i = s; i <= e; i++) if (this.openTo(up + i, row + i)) this.standing[up + i] = per;
+          sum -= per * open;
+        }
+        // Nowhere left above: keep it in the row rather than lose it. Conservation first, always.
+        if (sum > 0) this.standing[row + s] += sum;
+      }
+    }
+  }
+
+  /** Is `cell` reachable straight up from `from` through open air, with nothing solid between? */
+  private openTo(cell: number, from: number): boolean {
+    for (let i = from; i >= cell; i -= this.w) if (!this.holdsWater(i)) return false;
+    return true;
+  }
+
   // --- granular physics ----------------------------------------------------------------------
 
   /**
@@ -278,6 +607,10 @@ export class SubstrateGrid {
     // Bound toxin travels with the charcoal it is bound to, or a slumping layer would shed its load.
     const cl = this.charcoalLoad[a]; this.charcoalLoad[a] = this.charcoalLoad[b]; this.charcoalLoad[b] = cl;
     const d = this.mold[a]; this.mold[a] = this.mold[b]; this.mold[b] = d;
+    // Swapped, not dropped, and that is what makes displacement work: substrate slumping into a
+    // puddle sends that water back where the substrate came from instead of deleting it.
+    const st = this.standing[a]; this.standing[a] = this.standing[b]; this.standing[b] = st;
+    const dg = this.dug[a]; this.dug[a] = this.dug[b]; this.dug[b] = dg;
   }
 
   /** Nothing may fall into a cell that is occupied or anchoring a root. */

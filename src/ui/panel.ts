@@ -9,11 +9,13 @@
 
 import { describe, humidity } from '../sim/atmosphere.js';
 import { LightField } from '../sim/light.js';
+import { standardLayers } from '../sim/config/balance.js';
 import { Substrate, type SubstrateId } from '../sim/config/content.js';
 import type { FailureMode } from '../sim/events.js';
 import { SPECIES, SpeciesId } from '../sim/config/species.js';
 import { GrowthLimiter, STRESS_CAUSE_COUNT, StressCause, type Plant } from '../sim/plant.js';
 import type { World } from '../sim/world.js';
+import { GEAR_ICON } from './settings.js';
 
 export type Tool =
   | 'water'
@@ -22,9 +24,17 @@ export type Tool =
   | 'seedSucculent'
   | 'springtails'
   | 'moss'
+  | 'lilies'
+  | 'snails'
+  | 'hornwort'
+  | 'fish'
+  | 'reeds'
+  | 'clearPond'
   | 'paintGravel'
   | 'paintCharcoal'
   | 'paintSoil'
+  | 'paintMud'
+  | 'dig'
   | 'prune'
   | 'pesticide';
 
@@ -32,6 +42,13 @@ const TOOL_MATERIAL: Partial<Record<Tool, SubstrateId>> = {
   paintGravel: Substrate.Gravel,
   paintCharcoal: Substrate.Charcoal,
   paintSoil: Substrate.Soil,
+  paintMud: Substrate.Mud,
+  /*
+   * Digging is painting AIR, which is why it needs no new command, no new code path in the sim, and
+   * no second way for a cell to change. Everything that makes amending cost something — the spilt
+   * water, the damaged roots — applies to excavation unchanged, because it is the same operation.
+   */
+  dig: Substrate.Air,
 };
 
 /** Exactly the shape of TOOL_MATERIAL above: one tool per species, no new UI concept to learn. */
@@ -225,6 +242,42 @@ export class Panel {
     this.wire();
     this.tool = 'paintSoil';
     this.syncTools();
+    this.showTab(loadTab());
+  }
+
+  /**
+   * Show one Tend tab and hide the other. The selected tool is left alone: switching tab to look at
+   * what the other one holds should not put down what is in your hand.
+   */
+  private showTab(tab: TendTab): void {
+    this.root.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((b) => {
+      const on = b.dataset.tab === tab;
+      b.setAttribute('aria-selected', String(on));
+      b.tabIndex = on ? 0 : -1;
+    });
+    this.root.querySelectorAll<HTMLElement>('[data-panel]').forEach((p) => {
+      p.hidden = p.dataset.panel !== tab;
+    });
+    saveTab(tab);
+  }
+
+  /**
+   * Brush size, 1 to BRUSH_MAX: 1 paints a single cell, each step up widens the round footprint by a
+   * cell on every side. Only the Build tools use it.
+   */
+  brushSize = 1;
+
+  /** The brush's radius in cells, as the sim command takes it. */
+  brushRadius(): number {
+    return this.brushSize - 1;
+  }
+
+  /** Grow or shrink the brush by one step, within its limits. */
+  resizeBrush(step: number): void {
+    this.brushSize = Math.max(1, Math.min(BRUSH_MAX, this.brushSize + step));
+    this.refs.brushSize.textContent = String(this.brushSize);
+    (this.refs.brushDown as HTMLButtonElement).disabled = this.brushSize <= 1;
+    (this.refs.brushUp as HTMLButtonElement).disabled = this.brushSize >= BRUSH_MAX;
   }
 
   material(): SubstrateId | null {
@@ -246,13 +299,26 @@ export class Panel {
       });
     });
 
-    this.refs.bands.addEventListener('click', () => {
-      w.commands.push({ t: 'layerBands', gravelRows: 4, charcoalRows: 3, soilRows: 9 });
+    // The Land / Aquatic tabs: click, or the arrow keys between them, as tabs are expected to work.
+    const tabs = Array.from(this.root.querySelectorAll<HTMLButtonElement>('[data-tab]'));
+    tabs.forEach((b, i) => {
+      b.addEventListener('click', () => this.showTab(b.dataset.tab as TendTab));
+      b.addEventListener('keydown', (e) => {
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        e.preventDefault();
+        const next = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+        this.showTab(next.dataset.tab as TendTab);
+        next.focus();
+      });
     });
 
-    this.refs.seal.addEventListener('click', () => {
-      w.commands.push({ t: 'seal' });
-      // Sealing switches the default tool: build mode is over, tending begins.
+    this.refs.brushDown.addEventListener('click', () => this.resizeBrush(-1));
+    this.refs.brushUp.addEventListener('click', () => this.resizeBrush(1));
+    this.resizeBrush(0);
+
+    this.refs.bands.addEventListener('click', () => {
+      w.commands.push({ t: 'layerBands', ...standardLayers(w.cfg.raw.grid.interiorH) });
+      // The layers are the jar ready to plant, so the next thing in hand is the watering can.
       this.tool = 'water';
       this.syncTools();
     });
@@ -343,7 +409,9 @@ export class Panel {
     const a = w.atmo;
     const rh = humidity(w.cfg, a);
     const mood = describe(w.cfg, a);
-    const build = w.phase === 'build';
+    // The jar is sealed and running from the start; it is still being BUILT until it has been given
+    // water or anything alive. See `World.established`.
+    const build = !w.established;
 
     const minute = LightField.minuteOfDay(w.cfg, w.tickCount);
     const hh = String(Math.floor(minute / 60)).padStart(2, '0');
@@ -351,22 +419,15 @@ export class Panel {
     // The climax keeps the day count — it is still a running jar, not a score screen — and says what
     // it is beside the clock, where the build phase puts its instruction.
     const finished = w.phase === 'climax';
-    text(this.refs.phase, build ? 'Build' : `Day ${w.simDay}`);
-    text(
-      this.refs.clock,
-      build ? 'lay out your substrate, then seal it' : finished ? `${hh}:${mm} · overgrown` : `${hh}:${mm}`,
-    );
-    // A time is data and gets the mono face; the build-phase instruction is prose and must not.
-    this.refs.clock.classList.toggle('readout', !build);
+    text(this.refs.phase, `Day ${w.simDay}`);
+    text(this.refs.clock, finished ? `${hh}:${mm} · overgrown` : `${hh}:${mm}`);
 
-    // The tray row for the phase you are in reads at full strength; the other dims but stays usable.
+    // Once the jar is established the Build row dims, but stays usable: reshaping a living jar is
+    // allowed, it just costs, which is what the hint under it says.
     this.refs.buildRow.classList.toggle('inactive', !build);
-    this.refs.tendRow.classList.toggle('inactive', build);
-    // Only true once the jar is sealed, so only shown then.
     this.refs.paintHint.hidden = build;
-
-    (this.refs.seal as HTMLButtonElement).disabled = !build;
-    text(this.refs.seal, build ? 'Seal the jar' : 'Sealed');
+    // Standard layers lays all three bands at once over whatever is there, so it is only offered
+    // before anything has been watered or planted.
     (this.refs.bands as HTMLButtonElement).disabled = !build;
 
     /*
@@ -523,7 +584,7 @@ export class Panel {
     const plant = picked ?? worstOf(AUTO_PLANT_MARGIN);
 
     if (!plant) {
-      this.setHtml('who', `<p class="hint">${w.phase === 'build' ? 'Seal the jar, then plant a seed.' : 'No plants yet — pick a seed from the tools.'}</p>`);
+      this.setHtml('who', `<p class="hint">${!w.established ? 'Lay out the layers and water the soil, then plant a seed.' : 'No plants yet — pick a seed from the tools.'}</p>`);
       return;
     }
 
@@ -738,14 +799,39 @@ const TOPBAR = /* html */ `
     </div>
     <label class="lamp">Lamp <input type="range" min="0" max="100" value="60" data-ref="lamp" /></label>
     <button data-ref="lid" aria-pressed="false" title="Open to vent heat, fog and stale air — at the cost of the jar's water, and of being the only way pests get in">Lid: closed</button>
-    <button data-ref="music" aria-pressed="true" title="Ambient music on or off. Music only — it changes nothing else.">Music: on</button>
+    <button class="gear-btn" data-ref="settings" aria-label="Settings" title="Settings: music, lag-free mode, the tutorial, and the way back to the title (Esc)">${GEAR_ICON}</button>
     <button class="quiet-btn" data-ref="debug" aria-pressed="false" title="Debug overlay (D)">Debug</button>
   </div>
 `;
 
+/** The largest brush: an 11-cell-wide disc, a fair share of the jar in one stroke. */
+const BRUSH_MAX = 6;
+
+/** The two halves of the Tend row. */
+type TendTab = 'land' | 'aquatic';
+
+const TAB_KEY = 'terrapixel.tendTab';
+
+/** The tab the player last had open. A convenience only: storage may be unavailable, and then Land. */
+function loadTab(): TendTab {
+  try {
+    return localStorage.getItem(TAB_KEY) === 'aquatic' ? 'aquatic' : 'land';
+  } catch {
+    return 'land';
+  }
+}
+
+function saveTab(tab: TendTab): void {
+  try {
+    localStorage.setItem(TAB_KEY, tab);
+  } catch {
+    // Nothing to fall back to; the tab simply resets next load.
+  }
+}
+
 /**
- * The tools, directly under the jar they act on. Two rows by phase, both always usable: painting
- * still works after sealing, it just costs water and roots, so hiding it would be lying.
+ * The tools, directly under the jar they act on. Two rows, both always usable: painting still works in
+ * a living jar, it just costs water and roots, so hiding it would be lying.
  */
 const TRAY = /* html */ `
   <div class="tray-row" data-ref="buildRow">
@@ -754,25 +840,51 @@ const TRAY = /* html */ `
       <button data-tool="paintGravel" title="Drainage layer: place at the bottom to catch excess water">Gravel</button>
       <button data-tool="paintCharcoal" title="Filters toxins from decaying litter: place above the gravel">Charcoal</button>
       <button data-tool="paintSoil" title="Where roots anchor and plants grow: place on top">Soil</button>
+      <button data-tool="paintMud" title="Watertight lining. Click inside a dug hollow and it lines the whole thing, up to the height you clicked. Nothing roots in it.">Mud</button>
+      <button data-tool="dig" title="Remove a tile, leaving open space. Dig a hollow, click Mud once inside it, then fill it with water.">Dig</button>
+      <span class="brush" title="How many cells a Build tool paints at once. Keys: [ and ], or the mouse wheel over the jar.">
+        <span class="brush-label">Brush</span>
+        <button data-ref="brushDown" aria-label="Smaller brush">&minus;</button>
+        <span class="brush-size" data-ref="brushSize">1</span>
+        <button data-ref="brushUp" aria-label="Larger brush">+</button>
+      </span>
       <span class="sep" aria-hidden="true"></span>
-      <button class="primary" data-ref="bands">Standard layers</button>
-      <button class="primary" data-ref="seal">Seal the jar</button>
+      <button class="primary" data-ref="bands" title="Gravel, charcoal and soil in one go, ready to plant. Only before the jar has been watered or planted.">Standard layers</button>
     </div>
-    <p class="hint" data-ref="paintHint" hidden>Painting a sealed jar costs the cell's water and hurts nearby roots.</p>
+    <p class="hint" data-ref="paintHint" hidden>Reshaping a living jar costs the cell's water and hurts nearby roots.</p>
   </div>
-  <div class="tray-row inactive" data-ref="tendRow">
+  <div class="tray-row" data-ref="tendRow">
     <span class="tray-label">Tend</span>
-    <div class="tools">
+    <div class="tend">
+      <div class="tabs" role="tablist" aria-label="What to tend">
+        <button role="tab" id="tab-land" data-tab="land" aria-controls="panel-land" aria-selected="true">Land</button>
+        <button role="tab" id="tab-aquatic" data-tab="aquatic" aria-controls="panel-aquatic" aria-selected="false" tabindex="-1">Aquatic</button>
+      </div>
+      <div class="tools">
       <button data-tool="water" title="Click, or click and hold, to water the soil beneath the cursor">Water</button>
       <span class="sep" aria-hidden="true"></span>
-      <button data-tool="seedFern" title="Fern — shade-loving and thirsty. Keep the lamp low and the soil damp.">Fern</button>
-      <button data-tool="seedHerb" title="Herb — middling in everything. The forgiving one to learn a jar with.">Herb</button>
-      <button data-tool="seedSucculent" title="Succulent — wants bright light and dry soil, and rots if you keep it wet.">Succulent</button>
-      <span class="sep" aria-hidden="true"></span>
-      <button data-tool="springtails" title="Decomposers that recycle fallen litter into nutrients and fresh air">Springtails</button>
-      <button data-tool="moss" title="Ground cover that pulls new nutrients from the air, holds moisture in, and crowds out mold">Moss</button>
-      <button data-tool="prune" title="Remove a stem or leaf; cuttings become litter, and any pests on them go too">Prune</button>
-      <button data-tool="pesticide" title="Spray the plant under the cursor to kill its pests. Three sprays at least a day apart will clear an infestation for good — but spray too often and the plant sickens, and three doses close together kill it.">Pesticide</button>
+      <div class="tab-panel" id="panel-land" data-panel="land" role="tabpanel" aria-labelledby="tab-land">
+        <button data-tool="seedFern" title="Fern — shade-loving and thirsty. Keep the lamp low and the soil damp.">Fern</button>
+        <button data-tool="seedHerb" title="Herb — middling in everything. The forgiving one to learn a jar with.">Herb</button>
+        <button data-tool="seedSucculent" title="Succulent — wants bright light and dry soil, and rots if you keep it wet.">Succulent</button>
+        <span class="sep" aria-hidden="true"></span>
+        <button data-tool="springtails" title="Decomposers that recycle fallen litter into nutrients and fresh air">Springtails</button>
+        <button data-tool="moss" title="Ground cover that pulls new nutrients from the air, holds moisture in, and crowds out mold">Moss</button>
+        <span class="sep" aria-hidden="true"></span>
+        <button data-tool="prune" title="Remove a stem or leaf; cuttings become litter, and any pests on them go too">Prune</button>
+        <button data-tool="pesticide" title="Spray the plant under the cursor to kill its pests. Three sprays at least a day apart will clear an infestation for good — but spray too often and the plant sickens, and three doses close together kill it.">Pesticide</button>
+      </div>
+      <div class="tab-panel" id="panel-aquatic" data-panel="aquatic" role="tabpanel" aria-labelledby="tab-aquatic" hidden>
+        <button data-tool="lilies" title="Water lilies for a pond. Their broad pads spread across the surface, shading out the algae beneath and slowing evaporation, and flower once they have taken hold. Click on a pond.">Lily pads</button>
+        <button data-tool="hornwort" title="An underwater plant for ponds. It grows up from the bottom, soaks up the food algae live on, and holds them back. A thick bed of lily pads shades it out. Click on a pond.">Hornwort</button>
+        <button data-tool="reeds" title="Reeds for the edges of a pond: its outermost columns, or the bank one tile out. Tall stems stand up out of the water; they soak up the pond\'s food, but pump its water up into the air, so a reedbed dries a pond faster and makes the jar more humid. Click in a pond to plant both sides, or at one edge for just that side.">Reeds</button>
+        <span class="sep" aria-hidden="true"></span>
+        <button data-tool="fish" title="Small pond fish. They eat algae and clean up the floor, and their waste feeds the water. A pond kept spotless leaves them hungry, and stale water or a dried-up pond kills them. Click on a pond.">Fish</button>
+        <button data-tool="snails" title="Ramshorn snails for a pond. They graze algae and clean up what sinks, but a pond left to go stale will kill them. Click on a pond.">Snails</button>
+        <span class="sep" aria-hidden="true"></span>
+        <button data-tool="clearPond" title="Kill every plant in a pond: its lily pads, hornwort, reeds and algae, edge to edge. Fish and snails are spared. The dead plants rot where they fall, which feeds the water, so algae can come back, and a thick bloom killed all at once sours the water. Click on a pond.">Clear pond</button>
+      </div>
+      </div>
     </div>
   </div>
 `;

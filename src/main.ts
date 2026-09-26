@@ -14,6 +14,8 @@ import { Panel, type Tool } from './ui/panel.js';
 import { Onboarding, hasSeenOnboarding, type OnboardingFlags } from './ui/onboarding.js';
 import { Lessons } from './ui/lessons.js';
 import { Music } from './ui/music.js';
+import { Settings, SettingsMenu } from './ui/settings.js';
+import { TitleScreen } from './ui/title.js';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#stage')!;
 /** The whole notebook spread. Panel fills its regions; it never replaces the shell, which holds the canvas. */
@@ -25,28 +27,70 @@ const renderer = new Renderer(canvas, world);
 const panel = new Panel(host, world, (on) => {
   renderer.showDebug = on;
 });
-// Prepended into the field notes, ahead of Panel's own cards — see onboarding.ts for why this needs
-// no sim changes and no changes to Panel beyond the tool tooltips.
-const onboarding = new Onboarding(notes);
+/*
+ * The intro and checklist, prepended into the field notes ahead of Panel's own cards. Built when the
+ * player first leaves the title screen, so the intro card never sits on top of the title.
+ *
+ * There is no Seal button: the jar is sealed, empty, the moment the player is in, and its clock runs
+ * from then. Layout still follows until the jar is established (see `World.established`).
+ */
+let started = false;
+let onboarding: Onboarding | null = null;
 const onboardingFlags: OnboardingFlags = { usedWaterTool: false };
 /**
  * The rest of the teaching, which the checklist cannot carry: mold, sour soil and pests all arrive
  * sim-days after it has removed itself. Each lesson waits for its own trigger — see lessons.ts.
  */
 const lessons = new Lessons(notes);
-/** The ambient score. Reads the jar to pick its track; the button below is its only control. */
+/** The ambient score. Reads the jar to pick its track; the settings menu is its only control. */
 const music = new Music();
-const musicBtn = host.querySelector<HTMLButtonElement>('[data-ref="music"]');
-const syncMusic = (): void => {
-  if (!musicBtn) return;
-  musicBtn.textContent = `Music: ${music.on ? 'on' : 'off'}`;
-  musicBtn.setAttribute('aria-pressed', String(music.on));
-};
-musicBtn?.addEventListener('click', () => {
-  music.toggle();
-  syncMusic();
+const settings = new Settings();
+const menu = new SettingsMenu(settings);
+
+/** Into the player's jar, from the title screen: the first time, this is where the game begins. */
+function enterJar(): void {
+  title.hide();
+  music.title = false;
+  if (!onboarding) {
+    onboarding = new Onboarding(notes, () => {
+      started = true;
+      world.commands.push({ t: 'seal' });
+    });
+  }
+}
+
+function backToTitle(): void {
+  title.show(true);
+  music.title = true;
+}
+
+/** From the menu: the intro and checklist again. From the title, that means going into the jar first. */
+function replayTutorial(): void {
+  if (title.isVisible) enterJar();
+  onboarding?.replay();
+}
+
+/**
+ * The title screen: the name over a living jar of its own, with its own music. The player's jar waits,
+ * untouched and not running, until they press Start.
+ */
+const title = new TitleScreen({
+  start: enterJar,
+  // A new jar is a fresh page: the world, the tools and every card start over together.
+  newJar: () => location.reload(),
+  settings: () => menu.open({ replayTutorial }),
 });
-syncMusic();
+music.title = true;
+
+settings.watch((s) => {
+  music.setEnabled(s.music);
+  music.setVolume(s.volume);
+  renderer.lowFx = s.lowFx;
+  title.lowFx = s.lowFx;
+});
+
+const openSettings = (): void => menu.open({ replayTutorial, backToTitle });
+host.querySelector<HTMLButtonElement>('[data-ref="settings"]')?.addEventListener('click', openSettings);
 /** The intro modal is dismissed exactly once per browser, and that is what `hasSeenOnboarding` records. */
 let introDone = hasSeenOnboarding();
 
@@ -63,7 +107,7 @@ function actAt(clientX: number, clientY: number, wholePlant = false): void {
   const tool: Tool = panel.tool;
   const material = panel.material();
   if (material !== null) {
-    world.commands.push({ t: 'paint', x, y, material });
+    world.commands.push({ t: 'paintBrush', x, y, radius: panel.brushRadius(), material });
     return;
   }
   if (tool === 'water') {
@@ -88,6 +132,30 @@ function actAt(clientX: number, clientY: number, wholePlant = false): void {
   }
   if (tool === 'moss') {
     world.commands.push({ t: 'addMoss', x });
+    return;
+  }
+  if (tool === 'hornwort') {
+    world.commands.push({ t: 'addHornwort', x });
+    return;
+  }
+  if (tool === 'reeds') {
+    world.commands.push({ t: 'addReeds', x });
+    return;
+  }
+  if (tool === 'clearPond') {
+    world.commands.push({ t: 'clearPond', x });
+    return;
+  }
+  if (tool === 'fish') {
+    world.commands.push({ t: 'addFish', x });
+    return;
+  }
+  if (tool === 'snails') {
+    world.commands.push({ t: 'addSnails', x });
+    return;
+  }
+  if (tool === 'lilies') {
+    world.commands.push({ t: 'addLilies', x });
     return;
   }
   if (tool === 'pesticide') {
@@ -191,6 +259,17 @@ const stop = () => {
 };
 canvas.addEventListener('pointerup', stop);
 canvas.addEventListener('pointercancel', stop);
+// The mouse wheel over the jar resizes the brush while a Build tool is in hand; otherwise it is left alone.
+canvas.addEventListener(
+  'wheel',
+  (e) => {
+    if (panel.material() === null) return;
+    e.preventDefault();
+    panel.resizeBrush(e.deltaY < 0 ? 1 : -1);
+  },
+  { passive: false },
+);
+
 canvas.addEventListener('pointerleave', () => {
   renderer.hoverCell = -1;
 });
@@ -199,6 +278,12 @@ canvas.addEventListener('pointerleave', () => {
 const SPEED_KEYS: Record<string, number> = { '1': 1, '2': 16, '3': 32, '4': 64, '5': 128 };
 
 window.addEventListener('keydown', (e) => {
+  // The jar's shortcuts belong to the jar: none of them while the title, the settings or the intro is up.
+  if (title.isVisible || menu.isOpen || onboarding?.introOpen) return;
+  if (e.key === 'Escape') {
+    openSettings();
+    return;
+  }
   const picked = SPEED_KEYS[e.key];
   if (picked !== undefined && !e.ctrlKey && !e.metaKey && !e.altKey) {
     // Picking a speed also un-pauses: pressing a speed key on a paused jar means "run at this speed",
@@ -209,6 +294,10 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'd' || e.key === 'D') {
     renderer.showDebug = !renderer.showDebug;
     host.querySelector('[data-ref="debug"]')?.setAttribute('aria-pressed', String(renderer.showDebug));
+  }
+  // Brush size, as painting programs do it. Ignored while typing into anything.
+  if ((e.key === '[' || e.key === ']') && !(e.target instanceof HTMLInputElement)) {
+    panel.resizeBrush(e.key === ']' ? 1 : -1);
   }
   if (e.key === ' ') {
     e.preventDefault();
@@ -241,6 +330,14 @@ function frame(now: number): void {
   const elapsed = Math.min(now - last, 250);
   last = now;
 
+  // On the title screen only its own jar runs; the player's waits exactly where it was.
+  if (title.isVisible) {
+    title.frame(elapsed);
+    music.update(world);
+    requestAnimationFrame(frame);
+    return;
+  }
+
   // Click-and-hold pouring: while the pointer is down with the Water tool selected, add water
   // proportional to REAL elapsed time rather than to how many cells the cursor crossed. That is what
   // keeps a stationary hold pouring a steady stream (pointermove doesn't fire when the mouse doesn't
@@ -262,13 +359,14 @@ function frame(now: number): void {
   // Capping the number of ticks per frame instead does nothing at all: the accumulator only ever fills
   // at real-time rate, so it never holds more than one tick's worth anyway and every speed setting runs
   // at exactly 1x. Multiplying the elapsed time is what actually makes 16x run sixteen times faster.
-  const speed = panel.effectiveSpeed;
+  // Nothing advances until the player is in: not even the clock, while a first-time player reads the intro.
+  const speed = started ? panel.effectiveSpeed : 0;
   acc += elapsed * speed;
 
   // Pause stops the world advancing, but the player can still edit it — so a paused frame with queued
   // commands runs exactly one tick to apply them. Without this, painting while paused does nothing at
   // all and the tool reads as broken.
-  if (speed === 0 && world.commands.depth > 0) acc = STEP_MS;
+  if (speed === 0 && started && world.commands.depth > 0) acc = STEP_MS;
 
   const phaseBefore = world.phase;
   let ran = 0;
@@ -306,9 +404,14 @@ function frame(now: number): void {
 
   // The pesticide notes belong to the tool, so they follow the tool selection every frame.
   renderer.pesticideMode = panel.tool === 'pesticide';
+  {
+    // The brush preview follows the tool in hand every frame, like the pesticide notes do.
+    const material = panel.material();
+    renderer.brush = material === null ? null : { radius: panel.brushRadius(), material };
+  }
   renderer.render(Math.min(1, acc / STEP_MS));
   panel.update();
-  onboarding.update(world, onboardingFlags);
+  onboarding?.update(world, onboardingFlags);
   if (!introDone) introDone = hasSeenOnboarding();
   lessons.update(world, introDone);
   music.update(world);

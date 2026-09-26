@@ -12,6 +12,8 @@ import type { SpeciesId } from './config/species.js';
 
 export type Command =
   | { t: 'paint'; x: number; y: number; material: SubstrateId }
+  /** Paint a round brush of `radius` cells (0 is a single cell) centred on (x, y). */
+  | { t: 'paintBrush'; x: number; y: number; radius: number; material: SubstrateId }
   | { t: 'layerBands'; gravelRows: number; charcoalRows: number; soilRows: number }
   /**
    * Pour water onto a column.
@@ -27,6 +29,18 @@ export type Command =
   | { t: 'addSpringtails'; x: number; y: number }
   /** Plant a moss patch on this column's surface. */
   | { t: 'addMoss'; x: number }
+  /** Float lilies onto the water in column `x`. Refused on a column with no pond. */
+  | { t: 'addLilies'; x: number }
+  /** Put a snail culture into the pond in column `x`. Refused on a column with no pond. */
+  | { t: 'addSnails'; x: number }
+  /** Set hornwort into the pond in column `x`. Refused on a column with no pond. */
+  | { t: 'addHornwort'; x: number }
+  /** Put fish into the pond in column `x`. Refused on a column with no pond. */
+  | { t: 'addFish'; x: number }
+  /** Plant reeds in the pond in column `x`. Refused on a column with no pond. */
+  | { t: 'addReeds'; x: number }
+  /** Kill every plant in the pond at column x: lilies, hornwort, reeds and algae. They rot where they fall. */
+  | { t: 'clearPond'; x: number }
   | { t: 'prune'; node: number }
   /** Spray pesticide over one whole plant: every leaf it has, and exactly one dose. */
   | { t: 'spray'; plant: number }

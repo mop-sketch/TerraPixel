@@ -15,6 +15,7 @@ import { THEME } from '../theme.js';
 import { Plate, hash2, withAlpha } from './plate.js';
 import { Overgrowth } from './overgrowth.js';
 import { PlantArt } from './plants.js';
+import { LampLight } from './lamplight.js';
 
 /**
  * The moments the simulation reports, given a body.
@@ -39,6 +40,9 @@ const DROPLET_START_Y = 1.5;
 
 const clamp01 = (v: number): number => (v < 0 ? 0 : v > 1 ? 1 : v);
 
+/** Shortest gap between two pour ripples in the same column, in real milliseconds. */
+const RIPPLE_GAP_MS = 250;
+
 const enum Fx {
   Droplet,
   Splash,
@@ -49,9 +53,11 @@ const enum Fx {
   Rescue,
   Culture,
   MossSeed,
-  Seal,
   Alarm,
   Spray,
+  Liner,
+  Ripple,
+  SinkLeaf,
 }
 
 interface Effect {
@@ -67,6 +73,15 @@ interface Effect {
   decay: number;
   /** Kind-specific: spin, tint choice, or the millilitres a droplet carries. */
   a: number;
+  /**
+   * Frames to sit inert before `life` starts counting down. Lets a single event fire a whole group of
+   * effects that then reveal themselves in sequence rather than all at once — the liner sweep is the
+   * one thing that currently uses it.
+   */
+  delay: number;
+  /** SinkLeaf only: the water's surface, and the floor it sinks to, in cells. */
+  y2?: number;
+  y3?: number;
 }
 
 export class Renderer {
@@ -77,12 +92,20 @@ export class Renderer {
    * would be clutter at any other time.
    */
   pesticideMode = false;
+  /**
+   * The Build brush in hand, or null when the tool is not a Build tool. Turns on the brush preview:
+   * without it, "what will this click change" is a question the player can only answer by clicking,
+   * which is exactly backwards for an amendment that costs water and roots to undo.
+   */
+  brush: { radius: number; material: SubstrateId } | null = null;
   /** Every live effect. Exposed for the browser check that the cap actually holds under load. */
   readonly fx: Effect[] = [];
   /** The jar as an illustration: vessel, watercolour substrate, glass. See plate.ts. */
   readonly plate: Plate;
   /** The plants as botanical silhouettes: roots, tapering stems, leaves per species, flowers. */
   private readonly plants: PlantArt;
+  /** The lamp's glow, shafts and caustics. */
+  private readonly lampLight: LampLight;
   /** What a finished jar looks like: vines, glass moss, green air. See overgrowth.ts. */
   private readonly overgrowth: Overgrowth;
   /** Wall-clock stamp for the vine creep, which is paced in real seconds, not sim time. */
@@ -106,6 +129,25 @@ export class Renderer {
   /** Real seconds of fog drift. Real, not sim, so the speed control does not blow the fog around. */
   private fogDrift = 0;
   /**
+   * Real seconds for the springtails' crawl and spring. Real, not sim, for the same reason as the fog:
+   * at 64x a colony paced in sim time would be a blur.
+   */
+  private lifeClock = 0;
+  /**
+   * Lag-free mode, from the player's settings: the costliest visuals are skipped (light beams, caustics,
+   * leaf shading and shadows, water beads). Nothing the player needs to read goes with them.
+   */
+  lowFx = false;
+  /** The lamp's light as it SHINES this frame: dimmed by fog and beaded glass. See `render`. */
+  private shine = 0;
+  /** This frame's open air: inside the glass, above the ground. */
+  private air = new Path2D();
+  /** When each column was last watered, in real seconds (`lifeClock`): its leaves are splashed. */
+  private readonly splashedAt: Float64Array;
+  /** Whether the player's system asks for reduced motion. */
+  private readonly still =
+    typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  /**
    * Scratch layer for the fog, for the same reason the overgrowth has one: the veil, the banks at the
    * glass and the drifting lobes all have to be cut off at the soil line TOGETHER, and the cut is a
    * `destination-out` fill. Done on the main context that erase would take the jar out with it.
@@ -114,6 +156,8 @@ export class Renderer {
   private readonly fogLayerCtx: CanvasRenderingContext2D;
   hoverCell = -1;
   showDebug = false;
+  /** When each column last threw a pour ripple, in real ms. See the `watered` event. */
+  private readonly rippledAt = new Map<number, number>();
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -127,6 +171,8 @@ export class Renderer {
     this.plate = new Plate(world, THEME.cellPx);
     this.plants = new PlantArt(world, THEME.cellPx);
     this.overgrowth = new Overgrowth(world.grid.w, world.grid.h, THEME.cellPx);
+    this.lampLight = new LampLight(this.logicalW, this.logicalH, THEME.cellPx);
+    this.splashedAt = new Float64Array(world.grid.w).fill(-Infinity);
     // Quarter res, like the moss wash: fog is nothing but soft gradients, so there is no detail to
     // lose, and the upscale's own smoothing softens the terrain cut for free.
     this.fogLayer = document.createElement('canvas');
@@ -186,9 +232,24 @@ export class Renderer {
    * Every spawn path goes through here so the cap cannot be forgotten on a new kind — which is
    * exactly how the uncapped bead bug got in.
    */
-  private spawn(kind: Fx, x: number, y: number, decay: number, vx = 0, vy = 0, a = 0): void {
+  private spawn(kind: Fx, x: number, y: number, decay: number, vx = 0, vy = 0, a = 0, delay = 0): void {
     if (this.fx.length >= THEME.maxEffects) return;
-    this.fx.push({ kind, x, y, vx, vy, life: 1, decay, a });
+    this.fx.push({ kind, x, y, vx, vy, life: 1, decay, a, delay });
+  }
+
+  /**
+   * The height of the water standing over a ground cell, in cells, or null when it is dry.
+   *
+   * Walks up the open column from the ground to the top of the water, and reads how full that last
+   * cell is, which is where the drawn waterline sits.
+   */
+  private waterSurfaceAbove(ground: number): number | null {
+    const g = this.world.grid;
+    let top = -1;
+    for (let i = ground - g.w; i >= 0 && g.substrate[i] === Substrate.Air && g.standing[i] > 0.001; i -= g.w) top = i;
+    if (top < 0) return null;
+    const cap = this.world.cfg.raw.standing.cellMl;
+    return g.yOf(top) + 1 - Math.min(1, g.standing[top] / cap);
   }
 
   /**
@@ -208,10 +269,28 @@ export class Renderer {
         case 'droplet':
           this.spawn(Fx.Droplet, e.x + 0.5, DROPLET_START_Y, 0.012, 0, 0.18, e.ml);
           break;
-        case 'watered':
         case 'dropletLanded':
+          // A bead of condensation dripping off the glass: a small splash where it lands, not a pour.
           this.spawn(Fx.Splash, g.xOf(e.cell) + 0.5, g.yOf(e.cell) + 0.2, 0.03, 0, 0, e.ml);
           break;
+        case 'watered': {
+          /*
+           * Every pour rings where it lands: on a pond's surface, or on the ground. One effect for
+           * pouring wherever it happens. (Poured into a pond, the event names the mud under the water,
+           * so the ring goes up at the water's surface rather than down on the floor.)
+           */
+          const col = g.xOf(e.cell);
+          // The leaves around a pour are splashed: they bead up and drip (see PlantArt.drawDew).
+          for (let x = Math.max(0, col - 3); x <= Math.min(g.w - 1, col + 3); x++) this.splashedAt[x] = this.lifeClock;
+          const surface = this.waterSurfaceAbove(e.cell) ?? g.yOf(e.cell);
+          const now = performance.now();
+          // A held pour fires every tick in five columns; one ring per column every quarter second is
+          // a busy surface rather than a strobe, and stays far inside the effect cap.
+          if (now - (this.rippledAt.get(col) ?? -Infinity) < RIPPLE_GAP_MS) break;
+          this.rippledAt.set(col, now);
+          this.spawn(Fx.Ripple, col + 0.5, surface, 0.028);
+          break;
+        }
         case 'seeded': {
           const surface = g.surfaceOfColumn[e.x];
           if (surface >= 0) this.spawn(Fx.Sprout, e.x + 0.5, g.yOf(surface), 0.008);
@@ -219,13 +298,37 @@ export class Renderer {
         }
         case 'flowered':
           // The petals opening are drawn from the node's age in plants.ts; this is only the glow.
-          this.spawn(Fx.BloomGlow, P.x[e.node], P.y[e.node], 0.011);
+          // `a` carries the species, so the glow takes the colour of that species' own bloom.
+          this.spawn(Fx.BloomGlow, P.x[e.node], P.y[e.node], 0.011, 0, 0, this.world.plants[P.plantId[e.node]]?.species ?? -1);
           break;
-        case 'leafDropped':
+        case 'leafDropped': {
+          /*
+           * A leaf that lands on a pond does not fall straight through it. It comes down to the surface,
+           * floats a while, drifting, then soaks through and sinks to the floor, where it becomes the
+           * litter that feeds the algae. Everywhere else it tumbles to the ground as it always did.
+           */
+          const surface = this.waterSurfaceAbove(e.cell);
+          if (surface !== null && this.fx.length < THEME.maxEffects) {
+            this.fx.push({
+              kind: Fx.SinkLeaf,
+              x: P.x[e.node],
+              y: P.y[e.node],
+              vx: 0,
+              vy: 0,
+              life: 1,
+              decay: 0.0022,
+              a: Math.random() * 6.28,
+              delay: 0,
+              y2: surface,
+              y3: g.yOf(e.cell),
+            });
+            break;
+          }
           // Falls from where the leaf actually was to the litter cell it becomes. A little sideways
           // drift and spin so a canopy shedding several at once does not look like rain.
           this.spawn(Fx.LeafFall, P.x[e.node], P.y[e.node], 0.012, (Math.random() - 0.5) * 0.04, 0.05, Math.random() * 6.28);
           break;
+        }
         case 'rootSevered':
           // Only a root the PLAYER cut reports itself. Roots lost to sour soil or mold die in numbers
           // — a whole system can go at once — and a burst of motes for each would be the same spray
@@ -303,10 +406,67 @@ export class Renderer {
         case 'mossPlanted':
           this.spawn(Fx.MossSeed, g.xOf(e.cell) + 0.5, g.yOf(e.cell) + 0.3, 0.012);
           break;
-        case 'sealed':
-          this.spawn(Fx.Seal, 0, 0, 0.009);
+        case 'hornwortPlanted':
+        case 'fishAdded':
+        case 'reedsPlanted':
+        case 'snailsAdded': {
+          const surface = this.waterSurfaceAbove(g.surfaceOfColumn[e.x]);
+          if (surface !== null) this.spawn(Fx.Ripple, e.x + 0.5, surface, 0.022);
+          break;
+        }
+        case 'pondCleared': {
+          /*
+           * The dead plants going down: a withered leaf per column, settling from the surface to the
+           * floor, the sinking running outward from the click, so the whole pond is seen to go at once
+           * rather than the cover simply vanishing between two frames.
+           */
+          for (let col = e.from; col <= e.to && this.fx.length < THEME.maxEffects; col++) {
+            const floor = g.surfaceOfColumn[col];
+            const surface = this.waterSurfaceAbove(floor);
+            if (surface === null) continue;
+            this.fx.push({
+              kind: Fx.SinkLeaf,
+              x: col + 0.2 + Math.random() * 0.6,
+              y: surface - 0.1,
+              vx: 0,
+              vy: 0,
+              life: 1,
+              decay: 0.0045,
+              a: Math.random() * 6.28,
+              delay: Math.min(Math.abs(col - e.x), 30) * 2,
+              y2: surface,
+              y3: g.yOf(floor),
+            });
+          }
+          break;
+        }
+        case 'liliesPlanted': {
+          // A ring on the water where it lands: the same mark a pour makes, because it is the same act.
+          const surface = this.waterSurfaceAbove(g.surfaceOfColumn[e.x]);
+          if (surface !== null) this.spawn(Fx.Ripple, e.x + 0.5, surface, 0.022);
+          break;
+        }
+        case 'basinLined':
+          /*
+           * One glint per lined cell, staggered so the light runs outward from the click — the same
+           * shape `lineBasin` swept when it decided which cells to replace. That is the whole point of
+           * the effect: a hollow can be lined all the way around from a single click, and without this
+           * the only proof is the colour of a dozen cells changing between one frame and the next.
+           *
+           * The stagger is a few frames per cell, capped, so a basin large enough to need many cells
+           * still finishes sweeping well inside a second rather than crawling.
+           */
+          for (let k = 0; k < e.cells.length; k++) {
+            const cell = e.cells[k];
+            const delay = Math.min(k, 40) * 1.4;
+            this.spawn(Fx.Liner, g.xOf(cell) + 0.5, g.yOf(cell) + 0.5, 0.045, 0, 0, 0, delay);
+          }
           break;
         case 'failure':
+          // Stale air never flashes the jar red. A settled jar lives near the stall line and crosses
+          // it night after night, so the alarm would be a nightly false alarm; the plant card's "growth
+          // paused" note says it quietly, and the music ignores it for the same reason.
+          if (e.mode === 'co2Stall') break;
           // One pulse, never a stack: several modes tripping together must not strobe.
           if (!this.fx.some((f) => f.kind === Fx.Alarm)) this.spawn(Fx.Alarm, 0, 0, 0.011);
           break;
@@ -334,12 +494,70 @@ export class Renderer {
     this.lastFrameMs = nowMs;
     this.overgrowth.update(this.world.phase === 'climax', dt);
     this.fogDrift += dt;
+    this.lifeClock += dt;
+
+    // How much light the lamp is giving right now: its setting, by the time of day. The same product
+    // the plants grow on, so what the player sees lit is what is actually being lit.
+    const light = LightField.dayFraction(this.world.cfg, this.world.tickCount) * this.world.atmo.lampIntensity;
+    /*
+     * How much of that SHINES: the glow, the beams and the caustics dim as the glass fogs and beads
+     * over, to about a third at the worst, so a misted jar is not a glare on top of its fog. Last
+     * frame's eased fog and bead levels, which change over seconds, not frames.
+     */
+    this.shine = light * (1 - 0.68 * Math.max(this.fogEma, this.beadEma * 0.85));
+    // The open air of the jar: inside the glass, above the ground. Beams and the lamp's bloom stay in it.
+    const air = new Path2D();
+    air.addPath(this.plate.vessel);
 
     this.plate.drawGround(ctx);
+    // On the back wall, so everything in the jar stands in front of it.
+    if (!this.lowFx) this.lampLight.drawCaustics(ctx, this.plate.vessel, this.shine, this.lifeClock);
     this.plate.drawSubstrate(ctx, alpha);
+    // The ground is only known once the substrate is drawn.
+    if (this.plate.ground) air.addPath(this.plate.ground);
+    this.air = air;
 
+    // Over the substrate, under everything alive: water fills the pores and pools you can see into.
+    this.plate.drawWater(ctx);
     this.drawSoilLife();
-    this.plants.draw(ctx);
+    if (this.brush) this.plate.drawBrushPreview(ctx, this.hoverCell, this.brush.radius, this.brush.material);
+    // The lamp's shafts, in the air BEHIND the plants, so a leaf in front of one blocks it.
+    if (!this.lowFx) {
+      const c = this.cell;
+      const ground = this.plate.ground;
+      // The share of the lamp's light the sim says reaches a point: after every leaf above, none in soil.
+      const w = this.world;
+      const incident = w.cfg.raw.light.lampPpfd * light;
+      const lightAt = (px: number, py: number): number =>
+        incident <= 0 ? 0 : Math.min(1, w.light.at(Math.floor(px / c), Math.floor(py / c)) / incident);
+      this.lampLight.drawShafts(
+        ctx,
+        air,
+        ground,
+        (px) => this.surfaceAt(Math.floor(px / c)) * c,
+        lightAt,
+        this.shine,
+        this.lifeClock,
+      );
+    }
+    {
+      /*
+       * What wets the leaves. Dew from humid air, starting a little below the fog line and full once the
+       * jar is fogged; and a pour's splash, drying off over about twelve real seconds.
+       */
+      const w = this.world;
+      const rh = humidity(w.cfg, w.atmo);
+      const fogAt = w.cfg.raw.atmosphere.condensation.fogOnHumidity;
+      const dew = clamp01(Math.max((rh - (fogAt - 6)) / 12, this.fogEma * 0.85));
+      const now = this.lifeClock;
+      this.plants.draw(ctx, this.plate.vessel, this.plate.ground, {
+        seconds: now,
+        dew,
+        splashedAt: (x) => clamp01(1 - (now - this.splashedAt[x]) / 12),
+        still: this.still,
+        lowFx: this.lowFx,
+      });
+    }
 
     // Everything that washes over the jar stays inside the glass, so the page around it stays paper.
     ctx.save();
@@ -401,9 +619,8 @@ export class Renderer {
      */
     const duff = new Path2D();
     const duffDark = new Path2D();
-    const bugs = new Path2D();
     const moldy: number[] = [];
-    const wiggle = (w.tickCount >> 2) & 7;
+    const colony: number[] = [];
 
     for (const i of g.activeCells) {
       const px = g.xOf(i) * c;
@@ -437,17 +654,7 @@ export class Renderer {
 
       if (g.mold[i] > 0.02) moldy.push(i);
 
-      // Springtails: a handful of specks standing in for the colony, capped so a swarm stays readable.
-      const pop = w.fauna.pop[i];
-      if (pop >= 1) {
-        const shown = Math.min(6, Math.ceil(pop / 4));
-        for (let k = 0; k < shown; k++) {
-          const h = hash2(i, k + 17);
-          const sx = px + ((h + wiggle) % 85) * 0.01 * c;
-          const sy = py + ((h >> 9) % 75) * 0.01 * c;
-          bugs.rect(sx, sy, Math.max(1, c * 0.1), Math.max(1, c * 0.08));
-        }
-      }
+      if (w.fauna.pop[i] >= 1) colony.push(i);
     }
 
     // Litter first, then mold over it — fungus grows ON the pile — then the colony on top of both.
@@ -502,8 +709,183 @@ export class Renderer {
     }
     ctx.globalAlpha = 1;
 
-    ctx.fillStyle = THEME.springtail;
-    ctx.fill(bugs);
+    this.drawSpringtails(colony);
+  }
+
+  /**
+   * The springtails: a handful of small cream bugs per cell standing in for the colony, capped so a
+   * swarm stays readable.
+   *
+   * Each is a real little animal up close: a segmented abdomen, a head, two antennae and six legs,
+   * turned to face the way it is going. They crawl slowly in their cell, legs stepping as they go.
+   * Those on the surface now and then spring, the flick of the tail they are named for: a quick
+   * tumbling arc to a spot beside them, and a spring back later, so none wander off their cell.
+   * Those deeper in are the ones seen through the glass in the top of the soil, in its pores, so
+   * they only crawl, and a little dimmer.
+   *
+   * The sim knows populations, not bugs, so every bug is a hash of its cell and slot plus the clock:
+   * the same bug is in the same place frame to frame, with no state kept anywhere.
+   */
+  private drawSpringtails(colony: number[]): void {
+    const w = this.world;
+    const g = w.grid;
+    const c = this.cell;
+    const ctx = this.ctx;
+    const now = this.lifeClock;
+    const surface: Path2D[] = [new Path2D(), new Path2D(), new Path2D()];
+    const pores: Path2D[] = [new Path2D(), new Path2D(), new Path2D()];
+    const HOP_SECONDS = 0.45;
+
+    for (const i of colony) {
+      const x = g.xOf(i);
+      const px = x * c;
+      const py = g.yOf(i) * c;
+      // On top only where the ground here is open to the air: no hopping up through water or soil.
+      const onTop = g.surfaceOfColumn[x] === i && !(g.standing[i - g.w] > 0);
+      const shown = Math.min(6, Math.ceil(w.fauna.pop[i] / 4));
+      for (let k = 0; k < shown; k++) {
+        const h = hash2(i, k + 17);
+        const r = (b: number): number => ((h >>> b) % 1000) / 1000;
+        // Half the bugs of a surface cell walk the top; the rest, and every bug below, are in the pores.
+        const top = onTop && k % 2 === 0;
+        const speed = 0.25 + 0.3 * r(3);
+        const ph = r(7) * 6.283;
+        const tt = now * speed + ph;
+        let bx: number;
+        let by: number;
+        let vx: number;
+        let vy: number;
+        let tumble = 0;
+        let lift = 0;
+        if (top) {
+          // Crawl along the surface, and spring. A spring every 5 to 14 seconds, alternately out and back.
+          bx = px + c * (0.33 + 0.18 * Math.sin(tt) + 0.04 * Math.sin(2.7 * tt));
+          vx = Math.cos(tt) + 0.6 * Math.cos(2.7 * tt);
+          vy = 0;
+          // Standing ON the ground line, not across it.
+          by = py - c * 0.1;
+          const period = 5 + 9 * r(11);
+          const clock = now + r(13) * period;
+          const n = Math.floor(clock / period);
+          const into = clock - n * period;
+          const dir = r(17) < 0.5 ? 1 : -1;
+          const out = (n & 1) === 0;
+          let u = 1;
+          if (into < HOP_SECONDS) {
+            u = into / HOP_SECONDS;
+            lift = c * 0.7 * 4 * u * (1 - u);
+            tumble = dir * u * 6.283;
+          }
+          // Out-hops leave it 0.35c over; back-hops return it.
+          const reach = c * 0.35 * dir;
+          bx += out ? reach * (into < HOP_SECONDS ? u : 1) : reach * (into < HOP_SECONDS ? 1 - u : 0);
+          by -= lift;
+          if (into < HOP_SECONDS) vx = out ? dir : -dir;
+        } else {
+          bx = px + c * (0.5 + 0.3 * Math.sin(tt) + 0.05 * Math.sin(3.1 * tt + 1));
+          by = py + c * (0.5 + 0.28 * Math.sin(0.8 * tt + ph * 2));
+          vx = Math.cos(tt) + 0.155 * Math.cos(3.1 * tt + 1);
+          vy = 0.75 * Math.cos(0.8 * tt + ph * 2);
+        }
+        const m = Math.hypot(vx, vy) || 1;
+        let ax = vx / m;
+        let ay = vy / m;
+        if (tumble !== 0) {
+          const cs = Math.cos(tumble);
+          const sn = Math.sin(tumble);
+          [ax, ay] = [ax * cs - ay * sn, ax * sn + ay * cs];
+        }
+        // Legs step while walking; tucked in mid-air.
+        const step = lift > 0 ? 0 : Math.sin(now * 14 + ph * 3) > 0 ? 1 : -1;
+        // A bug walking the surface is seen from the side; mid-spring, or in the pores, from any angle.
+        this.springtail(top ? surface : pores, bx, by, ax, ay, step, now + ph, top && lift === 0);
+      }
+    }
+
+    // Legs and antennae in ink, then the bodies over them, outlined, then the segment lines.
+    ctx.save();
+    ctx.lineCap = 'round';
+    for (const [paths, alpha] of [[pores, 0.75], [surface, 1]] as const) {
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = THEME.springtailLeg;
+      ctx.lineWidth = 0.5;
+      ctx.stroke(paths[0]);
+      ctx.fillStyle = THEME.springtail;
+      ctx.fill(paths[1]);
+      ctx.strokeStyle = THEME.springtailInk;
+      ctx.lineWidth = 0.55;
+      ctx.stroke(paths[1]);
+      ctx.lineWidth = 0.4;
+      ctx.stroke(paths[2]);
+    }
+    ctx.restore();
+  }
+
+  /**
+   * One springtail at (x, y) facing (ax, ay), into [limbs, bodies, segment lines]. About 0.45 of a
+   * cell nose to tail: a long abdomen, a rounder head, antennae nearly half the body long.
+   *
+   * `profile` draws it side-on, as one walking along the surface is seen through the glass: the near
+   * three legs down to the ground, antennae forward and up. Seen from above, all six legs splay.
+   */
+  private springtail(
+    into: Path2D[],
+    x: number,
+    y: number,
+    ax: number,
+    ay: number,
+    step: number,
+    t: number,
+    profile: boolean,
+  ): void {
+    const c = this.cell;
+    const [limbs, bodies, lines] = into;
+    const nx = -ay;
+    const ny = ax;
+    // A point in the bug's own frame: `u` forward, `v` to its left, in cells.
+    const at = (u: number, v: number): [number, number] => [x + (ax * u + nx * v) * c, y + (ay * u + ny * v) * c];
+    const angle = Math.atan2(ay, ax);
+
+    // The side that is down on screen, for a bug seen in profile: +1 where its left is downward.
+    const down = ny >= 0 ? 1 : -1;
+    // Six legs off the front half, the pairs stepping in turn; in profile, the near three.
+    for (const [u, swing] of [
+      [0.08, 1],
+      [0.02, -1],
+      [-0.04, 1],
+    ] as const) {
+      for (const side of profile ? [down] : [1, -1]) {
+        const [x0, y0] = at(u, side * 0.04);
+        const [x1, y1] = at(u + 0.035 * swing * step * side, side * (profile ? 0.1 : 0.11));
+        limbs.moveTo(x0, y0);
+        limbs.lineTo(x1, y1);
+      }
+    }
+    // Antennae, feeling about: in profile both reach forward and up, one a little behind the other.
+    const wave = 0.03 * Math.sin(t * 3.3);
+    for (const side of [1, -1]) {
+      const lean = profile ? -down * (side > 0 ? 0.05 : 0.1) : side * 0.06;
+      const reach = profile ? -down * (side > 0 ? 0.1 : 0.15) : side * 0.1;
+      const [x0, y0] = at(0.2, profile ? -down * 0.02 : side * 0.02);
+      const [cx, cy] = at(0.29, lean + wave * (profile ? 1 : side));
+      const [x1, y1] = at(0.36, reach - wave * (profile ? 1 : side));
+      limbs.moveTo(x0, y0);
+      limbs.quadraticCurveTo(cx, cy, x1, y1);
+    }
+    // Abdomen, then head.
+    const [bx, by] = at(-0.05, 0);
+    bodies.moveTo(bx + Math.cos(angle) * 0.16 * c, by + Math.sin(angle) * 0.16 * c);
+    bodies.ellipse(bx, by, 0.16 * c, 0.065 * c, angle, 0, Math.PI * 2);
+    const [hx, hy] = at(0.15, 0);
+    bodies.moveTo(hx + Math.cos(angle) * 0.07 * c, hy + Math.sin(angle) * 0.07 * c);
+    bodies.ellipse(hx, hy, 0.07 * c, 0.058 * c, angle, 0, Math.PI * 2);
+    // Segment lines across the abdomen.
+    for (const u of [-0.13, -0.06, 0.01]) {
+      const [x0, y0] = at(u, 0.05);
+      const [x1, y1] = at(u, -0.05);
+      lines.moveTo(x0, y0);
+      lines.lineTo(x1, y1);
+    }
   }
 
   /**
@@ -521,6 +903,12 @@ export class Renderer {
 
     for (let k = this.fx.length - 1; k >= 0; k--) {
       const f = this.fx[k];
+      // Held inert until its turn: neither moving, decaying, nor drawn. This is what lets one event
+      // fan out into a sweep instead of every one of its effects appearing on the same frame.
+      if (f.delay > 0) {
+        f.delay -= 1;
+        continue;
+      }
       f.x += f.vx;
       f.y += f.vy;
       f.life -= f.decay;
@@ -556,15 +944,54 @@ export class Renderer {
           // at barely-wider-than-the-flower it was invisible in a still, which defeats the point of
           // the win condition finally having a moment.
           const r = c * (0.9 + t * 3.2);
+          const own = THEME.species[f.a]?.bloom.petal;
+          const glow = own ? withAlpha(own, 0.4) : THEME.fx.bloomGlow;
           const grad = ctx.createRadialGradient(px, py, 0, px, py, r);
-          grad.addColorStop(0, THEME.fx.bloomGlow);
-          grad.addColorStop(0.45, withAlpha(THEME.fx.bloomGlow, 0.16));
-          grad.addColorStop(1, withAlpha(THEME.fx.bloomGlow, 0));
+          grad.addColorStop(0, glow);
+          grad.addColorStop(0.45, withAlpha(glow, 0.16));
+          grad.addColorStop(1, withAlpha(glow, 0));
           ctx.globalAlpha = f.life;
           ctx.fillStyle = grad;
           ctx.beginPath();
           ctx.arc(px, py, r, 0, Math.PI * 2);
           ctx.fill();
+          break;
+        }
+
+        case Fx.SinkLeaf: {
+          // Down to the water (the first eighth of its life), afloat and drifting (to just past half),
+          // then soaking through and sinking to the floor, fading as it settles into the mud.
+          const start = f.y;
+          const top = f.y2 ?? start;
+          const bottom = f.y3 ?? top;
+          let ly: number;
+          let lx = f.x;
+          let spin = f.a;
+          if (t < 0.12) {
+            const u = t / 0.12;
+            ly = start + (top - start) * u * u;
+            spin += u * 3;
+          } else if (t < 0.55) {
+            const u = (t - 0.12) / 0.43;
+            ly = top - 0.06 + Math.sin(u * 9) * 0.03;
+            lx += Math.sin(u * 2.5 + f.a) * 0.6;
+            spin += 3 + Math.sin(u * 4) * 0.2;
+          } else {
+            const u = (t - 0.55) / 0.45;
+            ly = top + (bottom - 0.2 - top) * (1 - (1 - u) * (1 - u));
+            lx += Math.sin(2.5 + f.a) * 0.6 + Math.sin(u * 6) * 0.15;
+            spin += 3 + u * 1.5;
+          }
+          ctx.globalAlpha = t > 0.85 ? (1 - t) / 0.15 : 1;
+          ctx.fillStyle = THEME.fx.wither;
+          ctx.save();
+          ctx.translate(lx * c, ly * c);
+          // Lying flat on the water it is seen edge-on: squashed while afloat, tumbling once it sinks.
+          ctx.rotate(t < 0.55 && t >= 0.12 ? Math.sin(spin) * 0.15 : spin);
+          ctx.beginPath();
+          ctx.ellipse(0, 0, c * 0.34, c * (t >= 0.12 && t < 0.55 ? 0.1 : 0.16), 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
           break;
         }
 
@@ -617,6 +1044,41 @@ export class Renderer {
           break;
         }
 
+        case Fx.Ripple: {
+          // A ring on the water seen from the side, so a flat ellipse, widening as it fades.
+          ctx.globalAlpha = f.life * 0.8;
+          ctx.strokeStyle = THEME.water.glint;
+          ctx.lineWidth = 1;
+          const rx = c * (0.25 + t * 1.5);
+          ctx.beginPath();
+          ctx.ellipse(px, py, rx, rx * 0.2, 0, 0, Math.PI * 2);
+          ctx.stroke();
+          if (t < 0.5) {
+            const rx2 = rx * 0.5;
+            ctx.beginPath();
+            ctx.ellipse(px, py, rx2, rx2 * 0.2, 0, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+          break;
+        }
+
+        case Fx.Liner: {
+          /*
+           * A cell-sized wash that brightens in and settles rather than bursting outward, because
+           * nothing is flying off — a wall of soil is quietly becoming impermeable. Peaks a third of
+           * the way through its life, past the moment the delay released it, then fades into the mud
+           * colour the cell is left wearing anyway.
+           */
+          const pulse = Math.sin(Math.min(1, t / 0.35) * Math.PI * 0.5) * (1 - Math.max(0, t - 0.4) / 0.6);
+          ctx.globalAlpha = Math.max(0, pulse) * 0.8;
+          ctx.fillStyle = THEME.fx.liner;
+          const half = c * 0.52;
+          ctx.beginPath();
+          ctx.roundRect(px - half, py - half, half * 2, half * 2, c * 0.15);
+          ctx.fill();
+          break;
+        }
+
         case Fx.Culture:
           // A scatter of specks, deterministic from the effect's own position so they do not crawl.
           ctx.globalAlpha = f.life;
@@ -633,19 +1095,6 @@ export class Renderer {
           ctx.globalAlpha = f.life * 0.85;
           ctx.fillStyle = `rgb(${mr}, ${mg}, ${mb})`;
           circle(ctx, px, py, c * (0.18 + t * 0.5));
-          break;
-        }
-
-        case Fx.Seal: {
-          // One slow sweep of light down the glass: the build phase is over.
-          ctx.globalAlpha = f.life * 0.9;
-          const yy = t * H;
-          const grad = ctx.createLinearGradient(0, yy - c * 3, 0, yy + c * 3);
-          grad.addColorStop(0, withAlpha(THEME.fx.seal, 0));
-          grad.addColorStop(0.5, THEME.fx.seal);
-          grad.addColorStop(1, withAlpha(THEME.fx.seal, 0));
-          ctx.fillStyle = grad;
-          ctx.fillRect(0, yy - c * 3, W, c * 6);
           break;
         }
 
@@ -684,15 +1133,9 @@ export class Renderer {
     const W = this.logicalW;
     const H = this.logicalH;
 
-    // The lamp first, so night settles over a lit jar rather than the other way round.
-    const lamp = w.atmo.lampIntensity;
-    if (lamp > 0.01) {
-      const pool = ctx.createLinearGradient(0, 0, 0, H * 0.75);
-      pool.addColorStop(0, `rgba(255, 214, 140, ${(lamp * 0.3).toFixed(3)})`);
-      pool.addColorStop(1, 'rgba(255, 214, 140, 0)');
-      ctx.fillStyle = pool;
-      ctx.fillRect(0, 0, W, H * 0.75);
-    }
+    // The lamp first, so night settles over a lit jar rather than the other way round. Its glow follows
+    // the day as well as the lamp's setting: the lamp is the sun here, and it goes down.
+    this.lampLight.drawGlow(ctx, this.shine, this.air);
 
     // `dayFraction` is already a trapezoid with twilight ramps, so dawn and dusk come out for free.
     const night = 1 - LightField.dayFraction(w.cfg, w.tickCount);

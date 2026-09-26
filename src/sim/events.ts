@@ -24,6 +24,19 @@ export type SimEvent =
   | { t: 'resprouted'; plant: number }
   | { t: 'springtailsAdded'; cell: number }
   | { t: 'mossPlanted'; cell: number }
+  | { t: 'liliesPlanted'; x: number }
+  | { t: 'snailsAdded'; x: number }
+  | { t: 'hornwortPlanted'; x: number }
+  | { t: 'fishAdded'; x: number }
+  | { t: 'reedsPlanted'; x: number }
+  /** Every plant in the pond spanning columns from..to was killed, from a click at column x. */
+  | { t: 'pondCleared'; x: number; from: number; to: number }
+  /**
+   * A mud click found a hollow and lined the whole thing. `cells` are every cell it lined, in the
+   * order `lineBasin` filled them — floor first, outward from `origin` — so the renderer can sweep
+   * the visual the same way the tool actually worked rather than popping every cell at once.
+   */
+  | { t: 'basinLined'; cells: readonly number[]; origin: number }
   /** Crossed 40% of a failure counter: the player's window to act. */
   | { t: 'warning'; mode: FailureMode }
   | { t: 'warningCleared'; mode: FailureMode }

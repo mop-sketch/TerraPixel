@@ -6,7 +6,7 @@
  * specific, nameable bug. Read the comment above each phase before reordering anything.
  */
 
-import { SUBSTRATES, type SubstrateId } from './config/content.js';
+import { SUBSTRATES, type SubstrateId, Substrate } from './config/content.js';
 import { tempResponse, type CompiledSpecies } from './config/balance.js';
 import { LightField } from './light.js';
 import type { SpeciesId } from './config/species.js';
@@ -30,6 +30,7 @@ import { carbonPerCover as mossCarbonPerCover } from './moss.js';
 import type { Command } from './commands.js';
 import type { FailureMode } from './events.js';
 import type { World } from './world.js';
+import type { SubstrateGrid } from './grid.js';
 
 export function tick(w: World): void {
   w.events.length = 0;
@@ -64,17 +65,91 @@ export function tick(w: World): void {
 // ---------------------------------------------------------------------------------------------
 
 function drainCommands(w: World): void {
-  w.commands.drain(w.tickCount, (cmd) => applyCommand(w, cmd));
+  w.commands.drain(w.tickCount, (cmd) => {
+    applyCommand(w, cmd);
+    if (ESTABLISHES.has(cmd.t)) w.established = true;
+  });
+}
+
+/** Commands that put water or life into the jar, after which its layout is something to live with. */
+const ESTABLISHES: ReadonlySet<Command['t']> = new Set([
+  'water',
+  'plantSeed',
+  'addSpringtails',
+  'addMoss',
+  'addLilies',
+  'addSnails',
+  'addHornwort',
+  'addFish',
+  'addReeds',
+]);
+
+/**
+ * Line a dug hollow with mud in one go: the floor, both walls, and the face of every step between.
+ *
+ * The geometry lives on the grid itself (`SubstrateGrid.basinLiner`) so the hover preview the player
+ * sees before clicking and the paint this applies can never disagree about what a click will do. This
+ * function is just that query, followed through: pay the amendment cost per cell and report the sweep
+ * for the visual.
+ *
+ * Returns false when there is nothing to line, so the caller places mud the ordinary way instead.
+ */
+function lineBasin(w: World, x: number, y: number): boolean {
+  const g = w.grid;
+  const found = g.basinLiner(x, y);
+  if (!found) return false;
+  const { liner } = found;
+
+  for (const n of liner) {
+    const cx = g.xOf(n);
+    const cy = g.yOf(n);
+    // Lining is amending, cell by cell, and it costs what amending costs — including the roots it
+    // cuts. A pond dug through a plant's root zone is meant to hurt.
+    if (w.phase !== 'build') damageRootsNear(w, cx, cy);
+    w.paint(cx, cy, Substrate.Mud);
+  }
+
+  // Reported in a SWEEP order — nearest the click first — rather than the column-major order it was
+  // found in, so the visual spreads out from where the player clicked instead of ticking left to
+  // right across the jar regardless of where that was.
+  const origin = g.idx(x, y);
+  const swept = liner.slice().sort((a, b) => cellDist(g, a, origin) - cellDist(g, b, origin));
+  w.events.push({ t: 'basinLined', cells: swept, origin });
+  return true;
+}
+
+function cellDist(g: SubstrateGrid, a: number, b: number): number {
+  const dx = g.xOf(a) - g.xOf(b);
+  const dy = g.yOf(a) - g.yOf(b);
+  return Math.abs(dx) + Math.abs(dy);
 }
 
 function applyCommand(w: World, cmd: Command): void {
   const g = w.grid;
   switch (cmd.t) {
     case 'paint': {
+      // Mud dropped into a dug hollow lines the whole hollow rather than the one cell under the
+      // cursor. Anywhere else it is an ordinary material, placed a cell at a time.
+      if (cmd.material === Substrate.Mud && lineBasin(w, cmd.x, cmd.y)) break;
       // Any SEALED jar, the climax included — digging around live roots cuts them whatever
       // stage the jar has reached, and a finished jar must not quietly make painting free.
       if (w.phase !== 'build') damageRootsNear(w, cmd.x, cmd.y);
       w.paint(cmd.x, cmd.y, cmd.material);
+      break;
+    }
+    case 'paintBrush': {
+      /*
+       * Mud whose brush is centred in a dug hollow lines the whole hollow, exactly as a single click
+       * does: the liner, not a blob. Anywhere else a brush is simply many cells of the material, each
+       * painted, and each costing what a single amendment costs, roots included.
+       */
+      if (cmd.material === Substrate.Mud && lineBasin(w, cmd.x, cmd.y)) break;
+      for (const i of g.brushCells(cmd.x, cmd.y, cmd.radius, cmd.material)) {
+        const cx = g.xOf(i);
+        const cy = g.yOf(i);
+        if (w.phase !== 'build') damageRootsNear(w, cx, cy);
+        w.paint(cx, cy, cmd.material);
+      }
       break;
     }
     case 'layerBands':
@@ -128,6 +203,74 @@ function applyCommand(w: World, cmd: Command): void {
       const f = w.cfg.raw.fauna.springtail;
       w.fauna.seed(cell, f.cultureSize, f.popCapPerCell);
       w.events.push({ t: 'springtailsAdded', cell });
+      break;
+    }
+    case 'addHornwort': {
+      const added = w.pond.plantHornwort(w.cfg, cmd.x);
+      if (added <= 0) {
+        w.events.push({ t: 'plantRefused', x: cmd.x, reason: 'unrootable' });
+        break;
+      }
+      // Charged to the air, so planting it cannot conjure carbon, as with moss and lilies.
+      w.delta.co2Ppm -= added * w.cfg.raw.decay.co2PpmPerUnit;
+      w.delta.o2Pct += added * w.cfg.raw.decay.o2PctPerUnit;
+      w.events.push({ t: 'hornwortPlanted', x: cmd.x });
+      break;
+    }
+    case 'addReeds': {
+      const added = w.pond.plantReeds(w.cfg, cmd.x);
+      if (added <= 0) {
+        w.events.push({ t: 'plantRefused', x: cmd.x, reason: 'unrootable' });
+        break;
+      }
+      // Charged to the air, as every other planting is.
+      w.delta.co2Ppm -= added * w.cfg.raw.decay.co2PpmPerUnit;
+      w.delta.o2Pct += added * w.cfg.raw.decay.o2PctPerUnit;
+      w.events.push({ t: 'reedsPlanted', x: cmd.x });
+      break;
+    }
+    case 'clearPond': {
+      // The dead plants stay in the jar as litter (see PondLife.clearPlants), so the carbon books need
+      // nothing here: living pond carbon simply becomes litter carbon.
+      const pond = w.pond.clearPlants(w.cfg, g, cmd.x);
+      if (!pond) {
+        w.events.push({ t: 'plantRefused', x: cmd.x, reason: 'unrootable' });
+        break;
+      }
+      w.events.push({ t: 'pondCleared', x: cmd.x, from: pond.from, to: pond.to });
+      break;
+    }
+    case 'addFish': {
+      if (!w.pond.addFish(w.cfg, cmd.x)) {
+        w.events.push({ t: 'plantRefused', x: cmd.x, reason: 'unrootable' });
+        break;
+      }
+      w.events.push({ t: 'fishAdded', x: cmd.x });
+      break;
+    }
+    case 'addSnails': {
+      // Snails need water; on dry ground the culture is refused, as a seed is on ground it cannot use.
+      if (!w.pond.addSnails(w.cfg, cmd.x)) {
+        w.events.push({ t: 'plantRefused', x: cmd.x, reason: 'unrootable' });
+        break;
+      }
+      w.events.push({ t: 'snailsAdded', x: cmd.x });
+      break;
+    }
+    case 'addLilies': {
+      /*
+       * Lily pads floats, so it goes on WATER, never on ground. On a dry column it is refused with the
+       * same "this did not take" mark a seed gets on ground it cannot root in.
+       */
+      const added = w.pond.plantLilies(w.cfg, cmd.x);
+      if (added <= 0) {
+        w.events.push({ t: 'plantRefused', x: cmd.x, reason: 'unrootable' });
+        break;
+      }
+      // Charged to the air, so planting it cannot conjure carbon from nothing.
+      w.delta.co2Ppm -= added * w.cfg.raw.decay.co2PpmPerUnit;
+      w.delta.o2Pct += added * w.cfg.raw.decay.o2PctPerUnit;
+      w.events.push({ t: 'liliesPlanted', x: cmd.x });
       break;
     }
     case 'addMoss': {
@@ -597,7 +740,131 @@ function substrateWater(w: World): void {
   // direction (potential below field capacity equalises). Two mechanisms, cleanly separated.
   g.percolate();
   g.diffuse(w.cfg);
+  // After percolation has had its turn at the surplus, so runoff takes only what the ground itself
+  // could not carry down, and before free water levels, so what reaches a pond settles this tick.
+  runOff(w);
+  // Free water last: it is fed by whatever the pores above could not take, so it wants to see the
+  // settled result of percolation rather than last tick's.
+  g.flowStanding(w.cfg);
   w.sumpMl = g.sumpMl();
+}
+
+/**
+ * Water runs along the surface into a pond: fast when the ground is over-full, slowly when it is
+ * merely damp. The pond is the jar's drain, and the low point damp ground gives its water up to.
+ *
+ * Evaporation alone made a pond a slow watering can. It gives its water to anything drier, as open
+ * water in a closed jar always will, and nothing ever flowed back, so it drained in about a month and
+ * was no better than pouring the same water into the soil. Runoff is what flows back: a generous pour
+ * or a spell of heavy condensation near a pond ends up IN it, rather than sitting in the ground as
+ * the waterlogging that rots roots. A pond refills itself in a wet jar and drains in a dry one.
+ *
+ * The source is each column's surface cell, and only its water above field capacity. It travels
+ * along the surface, level or downhill, never over a ridge, up to `runoffReach` columns, and stops at
+ * the first column whose surface is a liner LOWER than where it set out: a pond's floor. A lone cell
+ * of mud on flat ground is not lower than its neighbours, so it collects nothing, and a jar with no
+ * lined pond at all is exactly as it was.
+ */
+function runOff(w: World): void {
+  const g = w.grid;
+  const c = w.cfg.raw.standing;
+  const reach = c.runoffReach;
+  const share = Math.min(1, c.runoffPerMin * w.cfg.dt);
+  const seepShare = Math.min(1, c.seepPerMin * w.cfg.dt);
+
+  // No liner at any column's surface means no pond, and nothing here can happen.
+  let anyBasin = false;
+  for (let x = 1; x <= g.w - 2 && !anyBasin; x++) {
+    const s = g.surfaceOfColumn[x];
+    if (s >= 0 && isFloor(w, s)) anyBasin = true;
+  }
+  if (!anyBasin) return;
+
+  const surfaceY = (x: number): number => {
+    const s = g.surfaceOfColumn[x];
+    return s < 0 ? -1 : g.yOf(s);
+  };
+  /** The nearest pond floor reachable from column x without climbing, or -1. */
+  const drainFor = (x: number): number => {
+    const start = surfaceY(x);
+    if (start < 0) return -1;
+    let best = -1;
+    let bestDist = reach + 1;
+    for (const dir of [-1, 1]) {
+      let prev = start;
+      for (let step = 1; step <= reach && step < bestDist; step++) {
+        const nx = x + dir * step;
+        if (nx < 1 || nx > g.w - 2) break;
+        const ny = surfaceY(nx);
+        // A ridge: the ground rises, and water does not run uphill.
+        if (ny < 0 || ny < prev) break;
+        prev = ny;
+        const s = g.surfaceOfColumn[nx];
+        if (ny > start && isFloor(w, s)) {
+          best = s;
+          bestDist = step;
+          break;
+        }
+      }
+    }
+    return best;
+  };
+
+  for (let x = 1; x <= g.w - 2; x++) {
+    const s = g.surfaceOfColumn[x];
+    if (s < 0) continue;
+    const props = g.props(s);
+    if (props.maxMl <= 0) continue;
+    const fc = props.fieldCapacityMl;
+    const m = g.moisture[s];
+    const damp = c.seepFromFraction * fc;
+    if (m <= damp) continue;
+    const drain = drainFor(x);
+    if (drain < 0) continue;
+    /*
+     * Two flows down the same path. What the ground cannot hold at all runs off fast. What it holds
+     * but is merely DAMP seeps slowly, and that slow flow is what keeps a pond in an ordinary jar:
+     * measured, a normally kept jar's surface sits at about 55% of field capacity, so runoff alone
+     * (which starts at 100%) never ran, and a pond drained into the jar in 20 to 40 days and stayed
+     * empty. With the seep, the pond's level becomes a reading of how the jar is kept: it holds in a
+     * jar kept normally, gives its water away in one left to dry, and fills in one that is drenched.
+     */
+    const flood = Math.max(0, m - fc) * share;
+    const moved = flood + (Math.min(m, fc) - damp) * seepShare;
+    // A pond with no room left above it keeps the rest in the ground, as it always did.
+    const left = poolAbove(w, drain, moved);
+    g.moisture[s] -= moved - left;
+    /*
+     * A FLOOD carries the soil's dissolved food into the pond with it, generously: over-watering beside
+     * a pond is the most familiar cause of green water there is.
+     */
+    if (moved > 0 && m > 0) {
+      /*
+       * And the slow seep carries a little too, as groundwater does. That is the steady supply that
+       * lets an ordinary pond green over in time without anyone feeding it: before it, the only food a
+       * pond in a normally kept jar ever got was whatever leaves happened to land in it.
+       */
+      const a = w.cfg.raw.algae;
+      const seep = moved - flood;
+      const share = (flood * a.runoffNutrientShare + seep * a.seepNutrientShare) / m;
+      const carried = g.nutrients[s] * share * ((moved - left) / moved);
+      g.nutrients[s] -= carried;
+      w.pond.nutrients[g.xOf(drain)] += carried;
+    }
+  }
+}
+
+/**
+ * A cell water rests ON rather than passing through: a solid that holds nothing in its pores.
+ *
+ * The distinction between that and "holds no water" is the whole of the liner. Mud and glass are
+ * both — they stop a pour dead. AIR holds no water either, and reading the two as the same thing
+ * turned every open cell into a floor: water poured onto a column still slumping into place found
+ * its surface index pointing at air, refused to fall any further, and hung in mid-jar.
+ */
+function isFloor(w: World, cell: number): boolean {
+  const p = w.grid.props(cell);
+  return p.solid && p.maxMl <= 0;
 }
 
 /** Push overflow down the column until something has room. Keeps water strictly conserved. */
@@ -605,15 +872,63 @@ function spillDown(w: World, from: number, ml: number): void {
   const g = w.grid;
   let remaining = ml;
   let i = from;
-  while (remaining > 0) {
+  /*
+   * Water cannot fall THROUGH a liner, only onto it.
+   *
+   * Without this the descent started inside the mud cell and carried on into whatever was beneath,
+   * so a basin drained straight through its own floor: the pour landed on the mud, found no room in
+   * it, and went looking downward. Being impassable is the entire job mud exists to do.
+   */
+  while (remaining > 0 && !isFloor(w, from)) {
     const below = i + g.w;
     if (below >= g.size || g.props(below).maxMl <= 0) break;
     remaining = g.add(below, remaining);
     i = below;
   }
-  // If the whole column is saturated the excess stays in the top cell as standing water: the jar is
-  // sealed, so it has nowhere else to go, and that is exactly the root-rot condition.
-  if (remaining > 0) g.moisture[from] += remaining;
+  /*
+   * Nowhere left to go. Where it ends up depends on what it is sitting in, and that distinction is
+   * what makes mud worth digging for.
+   *
+   * Where there is OPEN SPACE — on top of a liner, or in the air cell the pour landed in — the
+   * surplus becomes free water, which can be seen, can level, and can soak back in. Anywhere else it
+   * stays in the pores of the ground, as it always did: an over-watered jar is waterlogged, not a
+   * swimming pool, and a puddle forming on ordinary soil wherever somebody over-waters would make
+   * the liner pointless.
+   */
+  if (remaining > 0) {
+    const open = isFloor(w, from) || g.substrate[from] === Substrate.Air;
+    remaining = open ? poolAbove(w, from, remaining) : remaining;
+    // Whatever still has nowhere to go stays in the pores: a jar whose basin has overflowed and
+    // whose air space is full is simply waterlogged.
+    if (remaining > 0) g.moisture[from] += remaining;
+  }
+}
+
+/**
+ * Stack free water upward, a cell at a time, filling each to its capacity.
+ *
+ * Poured water lands in the same cell over and over, so without this a pond gains depth by stuffing
+ * one cell past what a cell can hold — 54 mL in a 12 mL space, which the renderer would draw as a
+ * single square and the levelling pass could never spread. Filling upward is what gives a pond a
+ * surface that rises as you pour into it.
+ *
+ * Starts in `from` itself when that is already open space, and just above it when it is ground.
+ *
+ * Returns whatever would not fit, which is water the jar has no room for anywhere above that column.
+ */
+function poolAbove(w: World, from: number, ml: number): number {
+  const g = w.grid;
+  const cap = w.cfg.raw.standing.cellMl;
+  let remaining = ml;
+  let i = g.substrate[from] === Substrate.Air ? from : from - g.w;
+  while (remaining > 0 && i >= 0 && g.substrate[i] === Substrate.Air) {
+    const room = Math.max(0, cap - g.standing[i]);
+    const moved = Math.min(remaining, room);
+    g.standing[i] += moved;
+    remaining -= moved;
+    i -= g.w;
+  }
+  return remaining;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -673,6 +988,7 @@ function resolveWaterDemand(w: World): void {
     }
     absorbDemand += Math.max(0, -moistureFlux(w, i, tempFactor, rh));
   }
+  evaporated += evaporateOpenWater(w, tempFactor, rh);
   w.delta.waterMl += evaporated;
 
   // The reverse direction: dry substrate pulls moisture back OUT of humid air.
@@ -848,6 +1164,49 @@ function rootDraw(w: World, n: number): number {
   const fill = plant.waterCapMl > 0 ? plant.waterMl / plant.waterCapMl : 1;
   const thirst = Math.max(0, 1 - fill);
   return c.rootMlPerMin * P.health[n] * thirst * w.cfg.dt;
+}
+
+/**
+ * Open water giving itself to the air: the whole point of a pond, and the whole cost of one.
+ *
+ * The surface of each column's topmost body of water evaporates toward 100% humidity, not toward its
+ * own wetness the way soil does, because open water is always saturated where it meets the air. That
+ * single difference is what makes a pond matter. A lined pond was an inert tank until this existed:
+ * measured over 40 days it held exactly the same 324 mL throughout, and the soil beside it carried
+ * less than the same jar without one. Now the water it holds comes back to the jar as condensation,
+ * and as dry soil drawing vapour out of the air, and the humidity that carries it pushes the jar
+ * toward fog, and so toward mold.
+ *
+ * No arbitration with roots: nothing roots in open water, so there is no one to compete with.
+ */
+function evaporateOpenWater(w: World, tempFactor: number, airRh: number): number {
+  if (tempFactor <= 0 || airRh >= 100) return 0;
+  const g = w.grid;
+  const c = w.cfg.raw;
+  const drive = (100 - airRh) / 100;
+  const perCell = c.standing.evapFactor * c.atmosphere.evapMlPerMinAtFullDrive * tempFactor * drive * w.cfg.dt;
+  let total = 0;
+  for (let x = 1; x <= g.w - 2; x++) {
+    /*
+     * From the surface of the topmost body here, down through it until this column's share is met.
+     *
+     * Not just the first wet cell. A full pond carries the thinnest film above its brim whenever
+     * anything tops it up, and taking only from the first wet cell meant the film was all that ever
+     * evaporated: the pond beneath it stopped evaporating entirely and looked, falsely, as if it were
+     * holding its level.
+     */
+    // Fronds on the surface, and a thick green mat in it, both cover the water and cut its evaporation.
+    let want = perCell * w.pond.evaporationFactor(w.cfg, x);
+    let i = g.idx(x, 1);
+    while (i < g.size - g.w && g.standing[i] <= 0) i += g.w;
+    for (; want > 0 && i < g.size - g.w && g.substrate[i] === Substrate.Air; i += g.w) {
+      const taken = Math.min(g.standing[i], want);
+      g.standing[i] -= taken;
+      want -= taken;
+      total += taken;
+    }
+  }
+  return total;
 }
 
 /** Evaporation exposure by depth below the column's surface cell, reduced by any moss mat above. */
@@ -1321,6 +1680,9 @@ function surfaceEcology(w: World): void {
   w.moss.step(w.cfg, w.grid, w.light, w.atmo, w.delta, w.rng);
   stepMold(w);
   decayLitter(w);
+  // After soil decay and before the fauna: pond litter rots into the water, and the algae that water
+  // feeds are what snails will one day graze.
+  w.pond.step(w.cfg, w.grid, w.atmo.co2Ppm, w.atmo.tempC, (i) => w.light.value[i], w.delta);
   w.fauna.step(w.cfg, w.grid, w.atmo, w.delta, w.rng);
   w.faunaPopulation = w.fauna.total();
   filterToxins(w);
@@ -1906,11 +2268,12 @@ function filterToxins(w: World): void {
  * signal is neither of the proxies. It is the plateau itself, which this measures directly: the jar is
  * still growing while it keeps setting new size records, and finished once it stops.
  *
- * `growthMargin` is what makes that robust. A settled jar's node count breathes by several percent
- * forever as leaves senesce and are replaced (170..177 across those seventy days), so a record has to
- * be beaten by a real margin, not by noise. Plant count is tested separately and without a margin,
- * because one new crown is a genuine event that should always restart the clock even though three
- * fresh nodes are lost inside the node-count noise.
+ * The record is a HIGH-WATER MARK, so the breathing of a settled jar (170..177 across those seventy
+ * days, as leaves senesce and are replaced) cannot beat it. What can is slow creep in a jar with room
+ * to spare, which is why growth is measured over the whole `holdDays` window against `growthMargin`
+ * (see its note in balance.ts). Plant count is tested separately and without a margin, because one new
+ * crown is a genuine event that should always restart the clock even though three fresh nodes are
+ * lost inside the node-count noise.
  */
 function updateClimax(w: World): void {
   // Sampled on the hour: the quantity changes on the timescale of a plant growing, and the verdict
@@ -1940,10 +2303,10 @@ function updateClimax(w: World): void {
    */
   if (!w.everBloomed) {
     w.climaxHold = 0;
+    w.climaxMarks.length = 0;
     return;
   }
 
-  const grew = nodes > w.climaxBestNodes * (1 + c.growthMargin) || plants > w.climaxBestPlants;
   if (nodes > w.climaxBestNodes) w.climaxBestNodes = nodes;
   if (plants > w.climaxBestPlants) w.climaxBestPlants = plants;
 
@@ -1966,12 +2329,29 @@ function updateClimax(w: World): void {
       // back to its old peak before it could ever finish again.
       w.climaxBestNodes = nodes;
       w.climaxBestPlants = plants;
+      w.climaxMarks.length = 0;
       w.events.push({ t: 'climaxEnded' });
     }
     return;
   }
 
-  w.climaxHold = grew ? 0 : w.climaxHold + dt;
+  /*
+   * How long the jar has gone without growing, measured over a WINDOW rather than hour to hour: back
+   * through the hourly records for as long as today's record is within `growthMargin` of the one then,
+   * with no plant added since. See `growthMargin` for why a margin tested hour to hour did damage and
+   * this does not.
+   */
+  const marks = w.climaxMarks;
+  marks.push({ nodes: w.climaxBestNodes, plants: w.climaxBestPlants });
+  const keep = Math.ceil((c.holdDays * day) / dt) + 1;
+  if (marks.length > keep) marks.splice(0, marks.length - keep);
+  let flat = 0;
+  for (let k = marks.length - 2; k >= 0; k--) {
+    const then = marks[k];
+    if (w.climaxBestNodes > then.nodes * (1 + c.growthMargin) || w.climaxBestPlants > then.plants) break;
+    flat++;
+  }
+  w.climaxHold = flat * dt;
   if (w.climaxHold >= c.holdDays * day) {
     w.phase = 'climax';
     w.climaxRelease = 0;

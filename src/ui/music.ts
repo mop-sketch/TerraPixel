@@ -66,6 +66,10 @@ export class Music {
    * the first gesture anywhere retries whatever should already be playing.
    */
   private unlocked = false;
+  /** The player's volume, 0..1, scaling the score's own level. */
+  private volume = 1;
+  /** Set while the title screen is up: it has its own track. */
+  title = false;
 
   constructor() {
     const unlock = (): void => {
@@ -78,6 +82,16 @@ export class Music {
 
   get on(): boolean {
     return this.enabled;
+  }
+
+  /** Music on or off, from the settings menu. */
+  setEnabled(on: boolean): void {
+    if (on !== this.enabled) this.toggle();
+  }
+
+  /** The player's volume, 0..1. Applied through the per-frame fade, so a change eases in. */
+  setVolume(v: number): void {
+    this.volume = Math.max(0, Math.min(1, v));
   }
 
   toggle(): void {
@@ -110,7 +124,7 @@ export class Music {
     // back mid-fade simply turns around rather than cutting.
     const step = dt / FADE_SECONDS;
     for (const [cue, el] of this.tracks) {
-      const target = cue === this.playing ? VOLUME : 0;
+      const target = cue === this.playing ? VOLUME * this.volume : 0;
       if (el.volume < target) el.volume = Math.min(target, el.volume + step * VOLUME);
       else if (el.volume > target) el.volume = Math.max(target, el.volume - step * VOLUME);
       // Only stop a track once it is silent, or the crossfade would have a hole in it.
@@ -130,9 +144,10 @@ export class Music {
     if (raw && held >= TROUBLE_ON_MS) this.trouble = true;
     if (!raw && held >= TROUBLE_OFF_MS) this.trouble = false;
 
+    // The title screen has its own track, whatever the player's jar is doing behind it.
+    if (this.title) return 'title';
     if (this.trouble) return 'alert';
     if (w.phase === 'climax') return 'climax';
-    if (w.phase === 'build') return 'title';
     return 'main';
   }
 

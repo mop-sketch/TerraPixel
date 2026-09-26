@@ -13,6 +13,7 @@ import { NodePool, type Plant } from './plant.js';
 import { LightField } from './light.js';
 import { FaunaField } from './fauna.js';
 import { MossField } from './moss.js';
+import { PondLife } from './pond.js';
 import { createAtmosphere, newDelta, type Atmosphere, type AtmoDelta } from './atmosphere.js';
 import { CommandQueue } from './commands.js';
 import { Rng } from './rng.js';
@@ -43,6 +44,8 @@ export class World {
   readonly light: LightField;
   readonly fauna: FaunaField;
   readonly moss: MossField;
+  /** Algae, and what feeds and follows them, in the jar's standing water. */
+  readonly pond: PondLife;
   readonly atmo: Atmosphere;
   readonly delta: AtmoDelta = newDelta();
   readonly commands = new CommandQueue();
@@ -93,8 +96,20 @@ export class World {
 
   tickCount = 0;
   phase: Phase = 'build';
-  /** Free air cells at seal time. Gas swings scale against this, so crowding tightens the air. */
+  /**
+   * Free air cells the jar's gas balance is measured against. Gas swings scale by this over the air
+   * there is now, so filling a jar that is already alive tightens its air. Follows the layout while the
+   * jar is being built and until it is `established`, then holds.
+   */
   baseAirCells = 1;
+  /**
+   * Latched the first time the jar is given water or anything alive. Until then it is only being BUILT,
+   * even with its clock running: there is nothing yet for a change of layout to cost, and its air volume
+   * follows the layout. The game seals the jar at the start now, empty, so without this the layers the
+   * player then lays down would halve the air against a volume taken from a bare jar, and every gas
+   * swing would run twice as hard as the balance intends.
+   */
+  established = false;
   /** Water poured in by the player, tracked so the conservation audit knows the expected total. */
   totalWaterAddedMl = 0;
   sumpMl = 0;
@@ -115,6 +130,11 @@ export class World {
   /** Largest the jar has ever been, in live nodes and in plants — the record growth must beat. */
   climaxBestNodes = 0;
   climaxBestPlants = 0;
+  /**
+   * The records as they stood each hour, oldest first, back as far as `climax.holdDays`: what the jar's
+   * growth over that window is measured against. Emptied until the jar first blooms, and on release.
+   */
+  climaxMarks: Array<{ nodes: number; plants: number }> = [];
   /** Total springtail population across the jar. Gates the fauna-suffocation failure. */
   faunaPopulation = 0;
   /** Sim-minutes humidity has held above the mold threshold. A spike must not start an outbreak. */
@@ -149,6 +169,7 @@ export class World {
     this.light = new LightField(this.grid);
     this.fauna = new FaunaField(this.grid.size);
     this.moss = new MossField(this.grid.size);
+    this.pond = new PondLife(this.grid.w);
     this.baseAirCells = this.countAirCells();
     this.atmo = createAtmosphere(this.cfg, this.baseAirCells);
     this.scratch = {
@@ -192,6 +213,9 @@ export class World {
     for (const p of this.pendingSurfaceWater) pending += p.ml;
     return (
       this.grid.totalWaterMl() +
+      // Free water: puddles, a flooded drainage layer, a pond. Held apart from substrate moisture
+      // everywhere else, but it is the same water and the closed system has to count it.
+      this.grid.standingMl() +
       this.atmo.airWaterMl +
       this.atmo.glassWaterMl +
       inFlight +
@@ -237,8 +261,14 @@ export class World {
       sugar += this.pool.sugar[n];
       structure += c.plant.growth.sugarCostPerNode;
     }
+    /*
+     * Litter wherever it lies, not only on soil. A leaf that falls into a pond lands on the mud floor,
+     * which holds no water and so is not an active cell; counting active cells alone made every leaf a
+     * pond caught look like carbon leaking out of a sealed jar. It is not leaking. It is sitting in the
+     * pond, undecayed, which is its own problem (see docs/water-bodies.md, stage 4), and a different one.
+     */
     let litter = 0;
-    for (const i of this.grid.activeCells) litter += this.grid.organic[i];
+    for (let i = 0; i < this.grid.size; i++) litter += this.grid.organic[i];
 
     return (
       this.atmo.co2Ppm +
@@ -247,11 +277,20 @@ export class World {
       litter * c.decay.co2PpmPerUnit +
       // Moss is living biomass too. Omitting it would make every mat the player grows look exactly
       // like carbon leaking out of a sealed jar.
-      this.moss.carbonPpm(this.cfg)
+      this.moss.carbonPpm(this.cfg) +
+      // And so are algae: a bloom fixes CO2 out of the air, and it must not look like a leak either.
+      this.pond.carbonPpm(this.cfg)
     );
   }
 
   /** Fraction of the exposed substrate surface under moss, 0-1. */
+  /** The greenest the jar's standing water is anywhere, 0 to 1. Read by the lesson and the harness. */
+  pondGreenness(): number {
+    let most = 0;
+    for (let x = 1; x <= this.grid.w - 2; x++) most = Math.max(most, this.pond.greenness(this.cfg, x));
+    return most;
+  }
+
   mossCover(): number {
     return this.moss.surfaceFraction(this.grid);
   }
@@ -315,7 +354,7 @@ export class World {
     }
     g.reindex();
     this.atmo.airCells = this.countAirCells();
-    if (this.phase === 'build') this.baseAirCells = this.atmo.airCells;
+    if (this.phase === 'build' || !this.established) this.baseAirCells = this.atmo.airCells;
   }
 
   /**
@@ -350,7 +389,10 @@ export class World {
       this.totalWaterAddedMl -= lost; // water leaves the closed system with the spoil
     }
 
+    // Remember what was dug out, so the liner can tell a dug hollow from the jar's own shape.
+    const wasGround = g.substrate[i] !== Substrate.Air;
     this.place(i, material);
+    g.dug[i] = material === Substrate.Air && wasGround ? 1 : material === Substrate.Air ? g.dug[i] : 0;
     // A cell that can no longer hold water must not keep any.
     const maxMl = SUBSTRATES[material].maxMl;
     if (maxMl <= 0) {
@@ -362,7 +404,7 @@ export class World {
     }
     g.reindex();
     this.atmo.airCells = this.countAirCells();
-    if (this.phase === 'build') this.baseAirCells = this.atmo.airCells;
+    if (this.phase === 'build' || !this.established) this.baseAirCells = this.atmo.airCells;
   }
 
   /**

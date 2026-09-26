@@ -109,6 +109,18 @@ const LESSONS: Lesson[] = [
     when: pestsVisible,
   },
   {
+    id: 'algae',
+    title: 'The pond has gone green',
+    body:
+      'Algae are blooming in the water. They feed on whatever rots in it — leaves falling in, and soil ' +
+      'washed in when the ground beside it is over-watered — and they grow on light. A bloom that dies ' +
+      'back leaves the water stale, and a full, stale pond sours the soil of its banks. Shade it, dim ' +
+      'the lamp, or keep leaves out of it, and it clears on its own. Lily pads floating on it shade ' +
+      'the algae out, and snails graze them away — but put snails in before the water goes badly ' +
+      'stale, because water left to rot for too long will kill them.',
+    when: (w) => w.pondGreenness() >= w.cfg.raw.algae.visibleGreenness,
+  },
+  {
     id: 'climax',
     title: 'The jar has filled in',
     body:

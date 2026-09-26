@@ -499,6 +499,247 @@ export interface BalanceConfig {
    * "mold appeared, then everything died" with no lever to pull. Feeding it on litter, and letting
    * springtails graze it, turns a bloom into a boom-and-bust with two visible counters.
    */
+  /**
+   * Free water: water standing in the open rather than held in a material's pores.
+   *
+   * See `SubstrateGrid.flowStanding`. This is what makes a drainage layer visibly fill, and what a
+   * pond will be built from.
+   */
+  standing: {
+    /** Millilitres a cell holds when completely full of water. */
+    cellMl: number;
+    /** Millilitres per sim-minute that standing water soaks into the material beneath it. */
+    soakMlPerMin: number;
+    /**
+     * Rounds of settle-then-level per tick. Each round flattens every row outright, so this is not how
+     * far water spreads (a whole basin levels in one) but how many times a pour can spill over a ledge
+     * and be re-settled before the tick ends.
+     */
+    levelPasses: number;
+    /**
+     * Open water's evaporation, as a multiple of soil's `atmosphere.evapMlPerMinAtFullDrive`.
+     *
+     * At 1 it evaporates exactly as a fully exposed, fully saturated soil cell does, which is honest:
+     * the difference is not the rate but that open water STAYS saturated. Soil dries at its surface
+     * and slows down; a pond never does, until it is gone.
+     */
+    evapFactor: number;
+    /**
+     * Share of a surface cell's water above field capacity that runs off toward a pond, per sim-minute.
+     * Only ever applies when a lined pond lies downhill within `runoffReach`; a jar without one is
+     * untouched.
+     */
+    runoffPerMin: number;
+    /** How many columns runoff can travel along the surface to reach a pond: its catchment. */
+    runoffReach: number;
+    /**
+     * Share of a catchment surface cell's water between `seepFromFraction` of field capacity and field
+     * capacity itself that drains toward the pond, per sim-minute. Far slower than runoff: this is damp
+     * ground giving up water to the lowest point, not a flood running off it.
+     */
+    seepPerMin: number;
+    /**
+     * The dampness, as a fraction of field capacity, below which ground keeps its water. Set well
+     * below the ~55% a normally kept jar's surface sits at, so an ordinary jar feeds its pond and a
+     * slightly dry one still partly does, and above what a jar that is drying out holds, so a dry
+     * jar's pond gives instead of takes.
+     */
+    seepFromFraction: number;
+  };
+
+  /**
+   * Algae in a pond. See src/sim/pond.ts. Quantities are per column; "per cell" means per 12 mL of
+   * water, the scale the soil's own toxin and nutrients are measured on.
+   */
+  algae: {
+    /** Less water than this in a column is not a pond, and anything living in it dies back. */
+    minWaterMl: number;
+    /** Biomass added per unit of biomass per sim-minute, at full light, food and CO2. */
+    growthPerMin: number;
+    /** Light (lamp PPFD units) at which growth runs at half speed. */
+    lightHalfSat: number;
+    /** Dissolved nutrients per cell of water at which growth runs at half speed. */
+    nutrientHalfSat: number;
+    co2HalfSatPpm: number;
+    /** The trace every pond carries, per cell of water: blooms start from this, never from nothing. */
+    sporeDensity: number;
+    /** The densest bloom water can hold, in biomass per cell of water. */
+    densityCap: number;
+    /** Nutrients spent per unit of biomass grown. */
+    nutrientPerUnit: number;
+    respirationPerMin: number;
+    deathPerMin: number;
+    /** Extra die-off, scaled by how short of light, food or CO2 the algae are: the crash. */
+    starveDeathPerMin: number;
+    /** How fast litter rots under water. Far faster than in soil: a submerged leaf softens in days. */
+    pondDecayPerMin: number;
+    /** How fast stale water clears on its own once nothing keeps souring it. */
+    sourDecayPerMin: number;
+    /** Share of the difference between neighbouring wet columns that mixes per sim-minute. */
+    mixPerMin: number;
+    /** How fast a brimming stale pond passes its sourness into the soil of its banks. */
+    bankSourPerMin: number;
+    /** How far out from a pond's column its banks are looked for, past the liner. */
+    bankReach: number;
+    /** Sourness a unit of dying algae leaves in the water. Far more than a leaf's: a rotting bloom. */
+    sourPerDeadUnit: number;
+    /** Evaporation cut at full greenness: a thick mat covers the surface. */
+    matShield: number;
+    /** Share of the soil's dissolved nutrients a flood carries with it into the pond. */
+    runoffNutrientShare: number;
+    /** The same, for the slow seep of damp ground: far less, but it never stops. */
+    seepNutrientShare: number;
+    /** Greenness at which the water reads as green: the warning and the lesson. */
+    visibleGreenness: number;
+  };
+
+  /**
+   * Water lilies: pads lying on the surface of a pond, rooted in its floor. See src/sim/pond.ts. Cover
+   * is per column, 0 to 1: how much of that column's surface the pads cover.
+   */
+  lilies: {
+    /** Cover one click of the tool adds to the column clicked. */
+    plantCover: number;
+    /** Cover added per unit of cover per sim-minute, at full light, food and CO2, before crowding. */
+    growthPerMin: number;
+    lightHalfSat: number;
+    /** Dissolved nutrients per cell of water at which growth runs at half speed. */
+    nutrientHalfSat: number;
+    /** Biomass, in litter units, a fully covered column carries: its carbon and its food. */
+    massPerColumn: number;
+    /** Nutrients spent per unit of biomass grown. */
+    nutrientPerUnit: number;
+    deathPerMin: number;
+    /** Extra die-off scaled by how short of food or CO2 it is. */
+    starveDeathPerMin: number;
+    /** Share of the difference in cover between neighbouring wet columns that spreads per sim-minute. */
+    spreadPerMin: number;
+    /** Share of the light a full mat takes before it reaches the algae in the water beneath. */
+    algaeShade: number;
+    /** Evaporation cut at full cover: pads lying on the water. */
+    evaporationShield: number;
+  };
+
+  /**
+   * Ramshorn snails: the pond's grazer, on the springtail pattern. See src/sim/pond.ts. Population is
+   * per column.
+   */
+  snails: {
+    /** Snails one click of the tool adds. */
+    cultureSize: number;
+    /** Most snails a column of pond can hold, however much food it has. */
+    popCapPerColumn: number;
+    /** Algae biomass one snail eats per sim-minute. */
+    algaeEatenPerMinPerPop: number;
+    /** Litter on the pond floor one snail eats per sim-minute, once the algae are scarce. */
+    litterEatenPerMinPerPop: number;
+    /** Snails a unit of food can support. Food sets the ceiling, so a colony crashes once it has cleaned up. */
+    carryingPerFood: number;
+    /**
+     * Snails a column can carry on nothing but the film that grows on every underwater surface. A pond
+     * with no algae and no litter is not a pond with no food at all.
+     */
+    biofilmPerColumn: number;
+    breedPerMin: number;
+    starveDeathPerMin: number;
+    /** A colony thinned by hunger keeps this many per column, so it recovers when food comes back. */
+    dormantFloor: number;
+    /** Share of what they eat that goes back into the water as nutrients: their droppings. */
+    assimilationYield: number;
+    /** Water staler than this, per cell of water, starts killing them. */
+    sourDeathAbove: number;
+    sourDeathPerMin: number;
+    /** Share of the difference between neighbouring wet columns that crawls across per sim-minute. */
+    spreadPerMin: number;
+  };
+
+  /**
+   * Hornwort: a submerged plant, growing up from the pond floor. See src/sim/pond.ts. Cover is per
+   * column, 0 to 1: how much of that column's water the fronds fill.
+   */
+  hornwort: {
+    /** Cover one click of the tool adds to the column clicked. */
+    plantCover: number;
+    growthPerMin: number;
+    lightHalfSat: number;
+    /** Low: it strips food out of the water far more efficiently than algae can, which is its point. */
+    nutrientHalfSat: number;
+    /** Biomass, in litter units, a column full of fronds carries. */
+    massPerColumn: number;
+    nutrientPerUnit: number;
+    deathPerMin: number;
+    starveDeathPerMin: number;
+    /** Share of the difference in cover between neighbouring wet columns that spreads per sim-minute. */
+    spreadPerMin: number;
+    /** Algae growth cut at full cover: the compounds hornwort gives off hold phytoplankton back. */
+    algaeSuppression: number;
+  };
+
+  /**
+   * Fish: small pond fish, the one creature in the jar you can watch go about its day. See
+   * src/sim/pond.ts. Population is per column, spreading fast, because they swim the whole pond.
+   */
+  fish: {
+    /** Fish one click of the tool adds. */
+    cultureSize: number;
+    /** Stocking limit: fish per cell of water. A pond carries as many as its volume can, no more. */
+    perCellOfWater: number;
+    /** Algae one fish eats per sim-minute. */
+    algaeEatenPerMinPerFish: number;
+    /** Litter off the pond floor one fish picks at per sim-minute. */
+    litterEatenPerMinPerFish: number;
+    /** Algae per cell of water at which fish graze it at half their best: they eat what they can see. */
+    algaeHalfDensity: number;
+    /** One fish's whole appetite per sim-minute, filled by algae first and then litter. */
+    mealPerMinPerFish: number;
+    /**
+     * Fish a cell of water feeds on its own, on the film of tiny life on every underwater surface. A
+     * pond with no algae and no litter is not a pond with nothing in it for a fish.
+     */
+    biofilmFishPerCell: number;
+    /** Breeding, only when well fed and only up to the stocking limit. Slow: this is not a hatchery. */
+    breedPerMin: number;
+    /**
+     * Death when they cannot find enough to eat. Slow: a fish goes a fortnight on very little, so a pond
+     * kept spotless by lilies or hornwort starves its fish gradually, not overnight.
+     */
+    starveDeathPerMin: number;
+    /** Share of what they eat that goes back into the water as nutrients: their waste. */
+    assimilationYield: number;
+    sourDeathAbove: number;
+    sourDeathPerMin: number;
+    /** Share of the difference between neighbouring wet columns that swims across per sim-minute. */
+    spreadPerMin: number;
+  };
+
+  /**
+   * Reeds: a marginal plant, rooted in the pond floor with its stems standing up out of the water. See
+   * src/sim/pond.ts. Cover is per column, 0 to 1.
+   */
+  reeds: {
+    /** Cover one click of the tool adds to the column clicked. */
+    plantCover: number;
+    growthPerMin: number;
+    lightHalfSat: number;
+    nutrientHalfSat: number;
+    /** Biomass, in litter units, a column of full reedbed carries. More than any other pond plant. */
+    massPerColumn: number;
+    nutrientPerUnit: number;
+    deathPerMin: number;
+    starveDeathPerMin: number;
+    /** Die-back per sim-minute once the pond has dried: slow, because reeds ride out a dry spell. */
+    dryDeathPerMin: number;
+    /** Share of the difference in cover between neighbouring pond columns that spreads per minute. */
+    spreadPerMin: number;
+    /** Water depth, in cells, they grow best in. Deeper than this they grow slower: they are marginal. */
+    shallowCells: number;
+    /**
+     * Extra evaporation at full cover, as a multiple of the open water's own: a reedbed pumps pond
+     * water up through its stems into the air.
+     */
+    transpiration: number;
+  };
+
   mold: {
     /**
      * Substrate wetness a cell needs before spores take hold. The jar-wide half of the condition is
@@ -650,7 +891,8 @@ export interface BalanceConfig {
      * growing, and a jar that has stopped growing inside the measurement window is measuring the
      * ending instead.
      *
-     * Measured climax day at this setting: well-built 77, mixed 62, fern-shade 105, wild 49.
+     * Measured climax day at this setting, in the 80x40 jar: well-built 42, mixed 72, fern-shade 67,
+     * wild 38. (The 64x32 jar, before the window: 54, 49, 79, 41.)
      */
     holdDays: number;
     /** Sim-days the jar must stay cut back before it releases, so it cannot flicker. */
@@ -665,21 +907,20 @@ export interface BalanceConfig {
      */
     releaseCut: number;
     /**
-     * How much bigger the jar must get to count as still growing, as a fraction.
+     * How much the jar must grow over the last `holdDays` to count as still growing, as a fraction.
      *
-     * Kept at zero, and the reasoning that argued for a margin was wrong. The worry was that a settled
-     * jar's node count breathes as leaves senesce and are replaced (measured at 170..177 over seventy
-     * days), so a bare "beat the record" test would keep restarting the clock on noise. But the record
-     * is a HIGH-WATER MARK and only ever ratchets up, so that breathing cannot beat it — only genuine
-     * new growth can, and new highs naturally become rarer as a jar approaches its ceiling.
+     * Measured across the whole WINDOW, not hour to hour, and that difference is everything. Tested
+     * hour to hour, as it first was, a relative margin was a disaster: a dim jar growing slowly adds a
+     * couple of nodes a week and never beats its record by three percent in any one hour, so it was
+     * declared finished while still filling (`fern-shade` climaxed on day 12 holding two plants). Over
+     * twenty days those same couple of nodes a week are a good tenth of a young jar, so it keeps growing
+     * and runs to day 67 and nine plants.
      *
-     * The margin did real damage in the meantime, because it is RELATIVE. A dim jar growing slowly adds
-     * a couple of nodes a week and never beats its record by three percent, so it was declared finished
-     * while it was still filling: `fern-shade` climaxed on day 12 holding two plants. At zero it runs to
-     * day 67 and nine plants, which is the jar actually finishing.
-     *
-     * Left as a tunable rather than deleted, because it is the first thing to reach for if a jar is
-     * ever seen flickering on the boundary.
+     * It was zero for a while, which is "any new record at all restarts the clock", and that held in
+     * the 64x32 jar because its plants reached a hard ceiling and stopped. In the 80x40 jar they never
+     * quite do: there is room to creep, a node every five days or so (216 to 236 over a hundred days,
+     * about 2% per window), and each creep was a new record. `well-built` took 121 days to finish. At
+     * 3% that creep counts as finished and real growth still does not: 42 days.
      */
     growthMargin: number;
     /**
@@ -729,6 +970,16 @@ export interface BalanceConfig {
   };
 }
 
+/**
+ * The standard layers for a jar `interiorH` rows tall: gravel, charcoal and soil in the 4 : 3 : 9 that
+ * the game was balanced on at 32 rows, scaled to the jar's height so a taller jar is filled to the same
+ * proportion rather than left with a deep empty headspace.
+ */
+export function standardLayers(interiorH: number): { gravelRows: number; charcoalRows: number; soilRows: number } {
+  const f = interiorH / 32;
+  return { gravelRows: Math.round(4 * f), charcoalRows: Math.round(3 * f), soilRows: Math.round(9 * f) };
+}
+
 export const DEFAULT_BALANCE: BalanceConfig = {
   version: 1,
   seed: 12345,
@@ -743,7 +994,12 @@ export const DEFAULT_BALANCE: BalanceConfig = {
     startMinute: 480, // 8am: the jar opens in full morning light
   },
 
-  grid: { interiorW: 64, interiorH: 32, cornerRadius: 5 },
+  /*
+   * 80x40, up from 64x32: a quarter more room each way, for ponds and planting. Measured before the
+   * change: the sim still runs at 2.3x what 128x needs, and the reference jar scaled up by area grew as
+   * well as it did at the old size. The corner radius scales with it, so the jar keeps its shape.
+   */
+  grid: { interiorW: 80, interiorH: 40, cornerRadius: 6 },
 
   water: {
     wiltingPointMl: 0.8,
@@ -1195,6 +1451,165 @@ export const DEFAULT_BALANCE: BalanceConfig = {
     evaporationShield: 0.6,
   },
 
+  /*
+   * A full cell of water holds 12 mL against soil's 10, because soil is mostly solid — swapping soil
+   * for water gains a little capacity rather than losing it.
+   *
+   * Soaking is deliberately slower than a tick: water poured onto dry ground should be seen to sit
+   * there for a moment and sink in, not teleport into the pores.
+   */
+  standing: {
+    cellMl: 12,
+    soakMlPerMin: 0.6,
+    levelPasses: 4,
+    /*
+     * A GAMEPLAY-SCALED figure, like the air's capacity. At soil's own rate a full 9-column pond was
+     * gone in about four days: soil has a brake, because its surface dries and slows down, and open
+     * water has none, so it just keeps giving until it is empty. At 0.08 the same pond lasts about a
+     * month while still lifting the jar's mean humidity by around ten points.
+     */
+    evapFactor: 0.08,
+    runoffPerMin: 0.1,
+    runoffReach: 8,
+    /*
+     * Tuned so a pond's level READS the jar. Over 60 days in the reference jar with a pond: charged at
+     * 2,400 mL it stayed full throughout; at 1,900 it settled around two-thirds; at 1,400 it gave all
+     * of its water to the soil by day 20. At 0.45 the threshold sat exactly on the 1,900 jar's damp
+     * ground, so a jar only a fifth drier than normal lost its pond outright, a switch rather than a
+     * gauge.
+     */
+    seepPerMin: 0.004,
+    seepFromFraction: 0.35,
+  },
+
+  algae: {
+    minWaterMl: 2,
+    growthPerMin: 0.006,
+    /*
+     * The lamp is the lever. At 130 a pond under a dim lamp still cannot out-grow its own respiration
+     * and stays clear however much food it gets, while an ordinary one greens over by itself in about
+     * two weeks: measured, 34% by day 15 with nobody feeding it. At 200 an ordinary pond barely tinted
+     * (10%), which made algae something that only happened to a deliberately neglected pond.
+     */
+    lightHalfSat: 130,
+    nutrientHalfSat: 0.1,
+    co2HalfSatPpm: 350,
+    sporeDensity: 0.005,
+    densityCap: 1.5,
+    nutrientPerUnit: 0.55,
+    respirationPerMin: 0.0004,
+    deathPerMin: 0.0003,
+    starveDeathPerMin: 0.0006,
+    pondDecayPerMin: 0.0006,
+    sourDecayPerMin: 0.0002,
+    mixPerMin: 0.1,
+    bankSourPerMin: 0.002,
+    bankReach: 3,
+    sourPerDeadUnit: 0.25,
+    matShield: 0.5,
+    runoffNutrientShare: 0.5,
+    seepNutrientShare: 0.2,
+    visibleGreenness: 0.3,
+  },
+
+  lilies: {
+    plantCover: 0.25,
+    growthPerMin: 0.004,
+    lightHalfSat: 80,
+    nutrientHalfSat: 0.05,
+    massPerColumn: 1.5,
+    nutrientPerUnit: 0.55,
+    // Low: a bed that is fed does not thin by itself. At 0.0002, with CO2 counted as hunger, it levelled
+    // off at two-thirds cover and the easier algae grew in the gaps.
+    deathPerMin: 0.0001,
+    starveDeathPerMin: 0.0008,
+    spreadPerMin: 0.004,
+    /*
+     * Most of it, but not all: a bed is pads with gaps between, and a pond under a full one is dim
+     * rather than dark. That is what makes lilies an ANSWER to algae rather than a switch that turns
+     * the water off.
+     */
+    algaeShade: 0.9,
+    evaporationShield: 0.6,
+  },
+
+  snails: {
+    cultureSize: 6,
+    popCapPerColumn: 12,
+    // Paced so a colony put into green water takes days to clear it, building up as it goes. At 0.0006
+    // with faster breeding, a 31%-green pond was clear inside a single day: a switch, not a colony.
+    algaeEatenPerMinPerPop: 0.00025,
+    litterEatenPerMinPerPop: 0.0001,
+    carryingPerFood: 6,
+    // With 9 columns, a pond carries about 7 on its own: a culture of 6 put into a clean pond holds.
+    biofilmPerColumn: 0.8,
+    breedPerMin: 0.0008,
+    /*
+     * Slow: ramshorn snails go weeks on very little. At 0.0008 a culture put into a clean pond halved
+     * inside twelve hours, which with the shells drawn per column looked like every one dying at once.
+     */
+    starveDeathPerMin: 0.00008,
+    dormantFloor: 0.3,
+    assimilationYield: 0.55,
+    /*
+     * High enough that ordinary green water is safe for them, which is the whole point of adding them.
+     * At 0.35, a heavily fed pond was already 0.41 stale by the time it LOOKED green, so snails put in
+     * to cure it died within a day, every one: doing the right thing, and watching it vanish. The rule
+     * is for a pond left to rot, not for a green one.
+     */
+    sourDeathAbove: 0.6,
+    sourDeathPerMin: 0.003,
+    spreadPerMin: 0.01,
+  },
+
+  hornwort: {
+    plantCover: 0.2,
+    growthPerMin: 0.003,
+    lightHalfSat: 90,
+    nutrientHalfSat: 0.03,
+    massPerColumn: 2,
+    nutrientPerUnit: 0.55,
+    deathPerMin: 0.0001,
+    starveDeathPerMin: 0.0006,
+    spreadPerMin: 0.0015,
+    algaeSuppression: 0.4,
+  },
+
+  fish: {
+    cultureSize: 3,
+    // A 9-column, 3-deep pond is about 25 cells of water: stocked full at three fish.
+    perCellOfWater: 0.12,
+    // A check on algae, not a steriliser: at 0.0015 even half a fish kept a bright, fed pond at 0%.
+    algaeEatenPerMinPerFish: 0.0003,
+    litterEatenPerMinPerFish: 0.0004,
+    algaeHalfDensity: 0.3,
+    mealPerMinPerFish: 0.0004,
+    // A 9-column, 3-deep pond is about 25 cells: two fish live on the film alone, three need a little more.
+    biofilmFishPerCell: 0.08,
+    breedPerMin: 0.00008,
+    starveDeathPerMin: 0.00006,
+    assimilationYield: 0.6,
+    sourDeathAbove: 0.45,
+    sourDeathPerMin: 0.003,
+    spreadPerMin: 0.1,
+  },
+
+  reeds: {
+    plantCover: 0.2,
+    growthPerMin: 0.002,
+    lightHalfSat: 80,
+    nutrientHalfSat: 0.04,
+    massPerColumn: 3,
+    nutrientPerUnit: 0.55,
+    deathPerMin: 0.00005,
+    starveDeathPerMin: 0.0004,
+    // About a fortnight to die out entirely once the pond has gone: reeds ride out a dry spell.
+    dryDeathPerMin: 0.00015,
+    spreadPerMin: 0.0008,
+    shallowCells: 1.5,
+    transpiration: 1.6,
+  },
+
   mold: {
     spawnWetness: 0.85,
     dwellMinutes: 180,
@@ -1361,7 +1776,7 @@ export const DEFAULT_BALANCE: BalanceConfig = {
    * Release is asymmetric and much shorter because it answers a player ACTION. Someone who prunes a
    * plant to reopen the jar should see it reopen, not wait a week wondering whether it worked.
    */
-  climax: { holdDays: 20, releaseDays: 2, growthMargin: 0, releaseCut: 0.2, settledStress: 0.3 },
+  climax: { holdDays: 20, releaseDays: 2, growthMargin: 0.03, releaseCut: 0.2, settledStress: 0.3 },
 
   failure: {
     strikeAccruePerTick: 1,
@@ -1458,8 +1873,9 @@ function validate(c: BalanceConfig): void {
     bad('cornerRadius is too large for the interior dimensions');
 }
 
-export function compile(raw: BalanceConfig): CompiledConfig {
-  validate(raw);
+export function compile(given: BalanceConfig): CompiledConfig {
+  validate(given);
+  const raw = scaleGasToJar(given);
 
   const dt = raw.time.simMinutesPerTick;
   const N = 128;
@@ -1522,6 +1938,43 @@ export function compile(raw: BalanceConfig): CompiledConfig {
     curveLoC: loC,
     curveHiC: hiC,
   });
+}
+
+/**
+ * The jar every gas rate in this file was balanced in. A different jar holds a different volume of air.
+ */
+export const REFERENCE_JAR = { interiorW: 64, interiorH: 32 } as const;
+
+/**
+ * The balance with every gas exchange rate scaled to this jar's volume of air.
+ *
+ * The rates say how far a unit of growth or decay moves the air's CO2 (in ppm) and O2 (in percent).
+ * That depends on how much air there is: a unit of sugar fixed out of a jar half the size moves its CO2
+ * twice as far. They were balanced in the 64x32 jar, and held fixed when the jar grew to 80x40, so the
+ * bigger jar's air behaved as if it were no bigger. Room for 1.56x the plants, drawing on the same
+ * air: settled CO2 fell from ~820 ppm to ~650 and kept falling, the starved plants crept up by a node
+ * at a time instead of levelling off, and every creep restarted the climax clock. The reference jar
+ * reached its climax on day 60; the 80x40 one took 130.
+ *
+ * Every rate is scaled by the same factor, fixation and release alike, so the carbon loop still closes
+ * exactly (see the `sugarCostPerNode` note in species.ts) and the audit needs nothing new. A starting
+ * CO2 in ppm is a concentration and already means the same in any jar, as does moss's O2 per ppm.
+ *
+ * Works on a copy: `main.ts` hands in the shared defaults, and a scaled config must never be scaled again.
+ */
+function scaleGasToJar(given: BalanceConfig): BalanceConfig {
+  const air = (REFERENCE_JAR.interiorW * REFERENCE_JAR.interiorH) / (given.grid.interiorW * given.grid.interiorH);
+  if (air === 1) return given;
+  const raw = structuredClone(given);
+  const ps = raw.plant.photosynthesis;
+  ps.co2PpmPerUnit *= air;
+  ps.o2PctPerUnit *= air;
+  const rs = raw.plant.maintenance;
+  rs.co2PpmPerRespiredSugar *= air;
+  rs.o2PctPerRespiredSugar *= air;
+  raw.decay.co2PpmPerUnit *= air;
+  raw.decay.o2PctPerUnit *= air;
+  return raw;
 }
 
 /** Deep-clone the defaults so a caller can mutate a copy without touching the shared object. */

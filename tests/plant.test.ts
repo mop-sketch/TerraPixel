@@ -8,6 +8,13 @@ import { LightField } from '../src/sim/light.js';
 import { World } from '../src/sim/world.js';
 import { tick } from '../src/sim/tick.js';
 
+/**
+ * The jar these tests were written and measured in. Several set up a situation with exact amounts
+ * (a 125 mL splash, a 9 L flood) that only produce it at this size; they test how a plant RESPONDS,
+ * not how big the jar is, so they pin the size rather than depend on the game's default.
+ */
+const OLD_JAR = { grid: { interiorW: 64, interiorH: 32, cornerRadius: 5 } };
+
 function jarWithSeed(overrides: Overrides = {}, x = 32) {
   const w = new World(cloneBalance(overrides));
   w.commands.push({ t: 'layerBands', gravelRows: 4, charcoalRows: 3, soilRows: 9 });
@@ -126,7 +133,7 @@ describe('health', () => {
    * actually blocking recovery. This is the regression test for that dead end.
    */
   it('recovers a leafless, sugar-starved plant once the water problem is actually fixed', () => {
-    const w = new World(cloneBalance());
+    const w = new World(cloneBalance(OLD_JAR));
     w.commands.push({ t: 'layerBands', gravelRows: 4, charcoalRows: 3, soilRows: 9 });
     w.commands.push({ t: 'seal' });
     tick(w);
@@ -783,7 +790,7 @@ describe('plant diagnosis', () => {
   });
 
   it('blames waterlogging in a drenched jar with no drainage', () => {
-    const { cause, peak } = causeAtPeak(jar({}, 9000, 0.5, { g: 0, c: 0, s: 16 }), 12);
+    const { cause, peak } = causeAtPeak(jar(OLD_JAR, 9000, 0.5, { g: 0, c: 0, s: 16 }), 12);
     expect(cause).toBe(StressCause.Rot);
     expect(peak).toBeGreaterThan(0.02);
   });

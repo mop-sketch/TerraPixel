@@ -67,8 +67,14 @@ if (/(^|\n)\s*(import|export)\s/.test(code) || /\bimport\s*\(/.test(code)) {
 let html = readFileSync(join(dist, 'index.html'), 'utf8');
 html = html.replace(/[ \t]*<script\b[^>]*\bsrc="[^"]*"[^>]*><\/script>\r?\n?/g, '');
 html = html.replace(/[ \t]*<link\b[^>]*\bstylesheet[^>]*>\r?\n?/g, '');
-if (css) html = html.replace('</head>', `  <style>\n${read(css)}\n  </style>\n  </head>`);
-html = html.replace('</body>', `  <script>\n${code}\n  </script>\n  </body>`);
+/*
+ * Replacements are given as FUNCTIONS, never as strings. A string replacement treats `$&`, `$'` and
+ * `` $` `` as special, and minified code is full of dollar signs: once the minifier named a variable
+ * `$` and followed it with `&&`, the `$&` spliced `</body>` into the middle of the script, and the page
+ * died on load with "Unexpected token '<'" while `vite build` and every test reported success.
+ */
+if (css) html = html.replace('</head>', () => `  <style>\n${read(css)}\n  </style>\n  </head>`);
+html = html.replace('</body>', () => `  <script>\n${code}\n  </script>\n  </body>`);
 
 if (html.includes('/assets/')) {
   console.error('An /assets/ reference survived — the file would not be self-contained.');
