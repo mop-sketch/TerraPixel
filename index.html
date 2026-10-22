@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Jarcadia</title>
+    <!--
+      The loading screen's own look, here in the page so it is drawn the moment the page arrives, before
+      the game's style sheet or code. The logo is fetched first of anything, and fades in when it is in.
+    -->
+    <link rel="preload" as="image" href="/TerraPixel/assets/jarcadia-logo-Dj0tB0O1.webp" />
+    <style>
+      #loading {
+        position: fixed; inset: 0; z-index: 10000;
+        display: flex; align-items: center; justify-content: center; padding: 16px;
+        transition: opacity 400ms ease;
+        /* The potting bench: oak planks with a dark seam between, long grain along them, darker to the corners. */
+        background:
+          radial-gradient(ellipse at 50% 45%, rgba(10, 6, 3, 0) 35%, rgba(10, 6, 3, 0.55) 100%),
+          repeating-linear-gradient(180deg, rgba(80, 48, 22, 0.1) 0 1px, transparent 1px 7px, rgba(240, 205, 160, 0.06) 7px 8px, transparent 8px 13px),
+          repeating-linear-gradient(180deg, #74563b 0, #684c33 75px, #5a412b 148px, #2a1b10 148px, #2a1b10 150px);
+        background-color: #4a3424;
+        font: 13px/1.5 ui-serif, Georgia, 'Iowan Old Style', 'Palatino Linotype', serif;
+        color: #2c2a26;
+      }
+      /* A card of the notebook's paper, taped to the bench. */
+      #loading .ld-card {
+        position: relative; width: min(560px, 100%);
+        padding: 26px 34px 22px;
+        display: flex; flex-direction: column; align-items: center; gap: 14px;
+        background:
+          linear-gradient(90deg, transparent 22px, rgba(191, 106, 88, 0.55) 22px 23.5px, transparent 23.5px),
+          repeating-linear-gradient(180deg, transparent 0 21px, rgba(63, 107, 138, 0.12) 21px 22px),
+          #efe7d8;
+        box-shadow: 0 1px 2px rgba(40, 20, 6, 0.35), 0 10px 24px -10px rgba(40, 20, 6, 0.6), 0 24px 50px -20px rgba(20, 10, 3, 0.7);
+        transform: rotate(-0.8deg);
+      }
+      #loading .ld-card::before, #loading .ld-card::after {
+        content: ''; position: absolute; top: -12px; width: 92px; height: 26px;
+        background: rgba(236, 224, 186, 0.86); box-shadow: 0 1px 2px rgba(40, 20, 6, 0.2);
+      }
+      #loading .ld-card::before { left: -18px; transform: rotate(-32deg); }
+      #loading .ld-card::after { right: -18px; transform: rotate(28deg); }
+      #loading .ld-logo { width: 100%; height: auto; opacity: 0; transition: opacity 300ms ease; }
+      #loading .ld-logo.in { opacity: 1; }
+      /* The bar: a glass tube filling with water, bubbles rising through it and a wave at its front. */
+      #loading .ld-track { position: relative; width: 100%; padding-top: 16px; }
+      #loading .ld-tube {
+        position: relative; height: 30px; border-radius: 15px; overflow: hidden;
+        background: rgba(232, 242, 244, 0.6);
+        border: 2px solid rgba(70, 52, 34, 0.7);
+        box-shadow: inset 0 2px 5px rgba(40, 20, 6, 0.22);
+      }
+      #loading .ld-fill {
+        position: absolute; inset: 0 auto 0 0; width: 0; transition: width 220ms linear;
+        background:
+          radial-gradient(circle at 30% 70%, rgba(255, 255, 255, 0.75) 0 1.5px, transparent 2.2px) 0 17px / 29px 17px,
+          radial-gradient(circle at 70% 20%, rgba(255, 255, 255, 0.55) 0 1px, transparent 1.6px) 11px 23px / 37px 23px,
+          linear-gradient(180deg, #8fcbe2 0, #4f9cc0 45%, #2f7596 100%) 0 0 / 100% 100%;
+        animation: ld-bubbles 1.8s linear infinite;
+        /* The front edge is a wave, rolling gently: the fill cut to a wavy line at its right-hand end. */
+        -webkit-mask:
+          linear-gradient(#000, #000) left top / calc(100% - 8px) 100% no-repeat,
+          url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='16'%3E%3Cpath d='M0 0L4 0C7 0 7 8 4 8C1 8 1 16 4 16L0 16Z'/%3E%3C/svg%3E") right 0 / 8px 16px repeat-y;
+        mask:
+          linear-gradient(#000, #000) left top / calc(100% - 8px) 100% no-repeat,
+          url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='16'%3E%3Cpath d='M0 0L4 0C7 0 7 8 4 8C1 8 1 16 4 16L0 16Z'/%3E%3C/svg%3E") right 0 / 8px 16px repeat-y;
+      }
+      @keyframes ld-bubbles {
+        to {
+          background-position: 0 0, 11px 0, 0 0;
+          -webkit-mask-position: left top, right 16px;
+          mask-position: left top, right 16px;
+        }
+      }
+      /* Light across the glass, over the water. */
+      #loading .ld-tube::after {
+        content: ''; position: absolute; left: 12px; right: 12px; top: 4px; height: 3px; border-radius: 2px;
+        background: rgba(255, 255, 255, 0.5);
+      }
+      #loading-bug { position: absolute; left: 0; top: 0; width: 30px; height: 18px; display: none; cursor: pointer; padding: 6px; margin: -6px; box-sizing: content-box; }
+      #loading .ld-label { margin: 0; font-family: 'Segoe Print', 'Ink Free', 'Chalkboard SE', 'Marker Felt', 'Comic Sans MS', sans-serif; font-size: 15px; color: #5a4630; }
+      #loading-tip { margin: 0; max-width: 46ch; text-align: center; font-style: italic; font-size: 16px; color: #4a4338; min-height: 3em; text-wrap: balance; }
+      @media (prefers-reduced-motion: reduce) { #loading, #loading .ld-fill, #loading .ld-logo { transition: none; animation: none; } }
+    </style>
+    <script>
+      // The game was called TerraPixel. A player's settings and progress were saved under that name;
+      // carry them over to the new one, once, before anything reads them.
+      try {
+        for (let k = 0; k < localStorage.length; k++) {
+          const key = localStorage.key(k);
+          if (!key || !key.startsWith('terrapixel.')) continue;
+          const moved = 'jarcadia.' + key.slice('terrapixel.'.length);
+          if (localStorage.getItem(moved) === null) localStorage.setItem(moved, localStorage.getItem(key));
+        }
+      } catch {
+        // Storage disabled: nothing saved to carry over.
+      }
+    </script>
+    <script type="module" crossorigin src="/TerraPixel/assets/index-CtFpLUoE.js"></script>
+    <link rel="stylesheet" crossorigin href="/TerraPixel/assets/index-Bi54-D2_.css">
+  </head>
+  <body>
+    <!--
+      The loading screen: here in the page itself, so it is there from the first moment, before any of
+      the game's code has arrived. ui/loading.ts runs it once the code is in (the bar, the tip, the wait,
+      the isopod) and takes it away.
+    -->
+    <div id="loading">
+      <div class="ld-card">
+        <img class="ld-logo" src="/TerraPixel/assets/jarcadia-logo-Dj0tB0O1.webp" alt="Jarcadia" onload="this.classList.add('in')" />
+        <div class="ld-track">
+          <div class="ld-tube"><div class="ld-fill" id="loading-fill"></div></div>
+          <div id="loading-bug" role="button" aria-label="An isopod"></div>
+        </div>
+        <p class="ld-label">Potting up...</p>
+        <p id="loading-tip"></p>
+      </div>
+    </div>
+    <!--
+      The notebook spread. The canvas lives here in the markup, not inside a Panel template: main.ts
+      and the Renderer take hold of #stage before Panel is built, so a Panel that set innerHTML on any
+      ancestor of the canvas would silently destroy the element they are drawing into.
+    -->
+    <div id="app">
+      <header id="topbar"></header>
+      <main id="jar"><div id="stage-wrap"><canvas id="stage" width="792" height="408"></canvas></div></main>
+      <section id="tray" aria-label="Tools"></section>
+      <aside id="notes" aria-label="Field notes"></aside>
+    </div>
+  </body>
+</html>
